@@ -185,6 +185,9 @@ cython_debug/
 .repomix
 repomix-output.txt
 
+# Emacs backup
+*~
+
 # evaluation
 evaluation/evaluation_outputs
 evaluation/outputs
@@ -230,6 +233,8 @@ yarn-debug.log*
 yarn-error.log*
 
 logs
+
+ralph/
 
 # agent
 .envrc

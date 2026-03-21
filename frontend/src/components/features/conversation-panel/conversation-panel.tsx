@@ -3,9 +3,10 @@ import { NavLink, useParams, useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import { usePaginatedConversations } from "#/hooks/query/use-paginated-conversations";
+import { useStartTasks } from "#/hooks/query/use-start-tasks";
 import { useInfiniteScroll } from "#/hooks/use-infinite-scroll";
 import { useDeleteConversation } from "#/hooks/mutation/use-delete-conversation";
-import { useStopConversation } from "#/hooks/mutation/use-stop-conversation";
+import { useUnifiedPauseConversationSandbox } from "#/hooks/mutation/use-unified-stop-conversation";
 import { ConfirmDeleteModal } from "./confirm-delete-modal";
 import { ConfirmStopModal } from "./confirm-stop-modal";
 import { LoadingSpinner } from "#/components/shared/loading-spinner";
@@ -15,6 +16,8 @@ import { Provider } from "#/types/settings";
 import { useUpdateConversation } from "#/hooks/mutation/use-update-conversation";
 import { displaySuccessToast } from "#/utils/custom-toast-handlers";
 import { ConversationCard } from "./conversation-card/conversation-card";
+import { StartTaskCard } from "./start-task-card/start-task-card";
+import { ConversationCardSkeleton } from "./conversation-card/conversation-card-skeleton";
 
 interface ConversationPanelProps {
   onClose: () => void;
@@ -37,6 +40,13 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
   const [selectedConversationId, setSelectedConversationId] = React.useState<
     string | null
   >(null);
+  const [selectedConversationTitle, setSelectedConversationTitle] =
+    React.useState<string | null>(null);
+  const [selectedConversationVersion, setSelectedConversationVersion] =
+    React.useState<"V0" | "V1" | undefined>(undefined);
+  const [selectedSandboxId, setSelectedSandboxId] = React.useState<
+    string | null
+  >(null);
   const [openContextMenuId, setOpenContextMenuId] = React.useState<
     string | null
   >(null);
@@ -50,11 +60,15 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
     fetchNextPage,
   } = usePaginatedConversations();
 
+  // Fetch in-progress start tasks
+  const { data: startTasks } = useStartTasks();
+
   // Flatten all pages into a single array of conversations
   const conversations = data?.pages.flatMap((page) => page.results) ?? [];
 
   const { mutate: deleteConversation } = useDeleteConversation();
-  const { mutate: stopConversation } = useStopConversation();
+  const { mutate: pauseConversationSandbox } =
+    useUnifiedPauseConversationSandbox();
   const { mutate: updateConversation } = useUpdateConversation();
 
   // Set up infinite scroll
@@ -65,14 +79,21 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
     threshold: 200, // Load more when 200px from bottom
   });
 
-  const handleDeleteProject = (conversationId: string) => {
+  const handleDeleteProject = (conversationId: string, title: string) => {
     setConfirmDeleteModalVisible(true);
     setSelectedConversationId(conversationId);
+    setSelectedConversationTitle(title);
   };
 
-  const handleStopConversation = (conversationId: string) => {
+  const handleStopConversation = (
+    conversationId: string,
+    version?: "V0" | "V1",
+    sandboxId?: string | null,
+  ) => {
     setConfirmStopModalVisible(true);
     setSelectedConversationId(conversationId);
+    setSelectedConversationVersion(version);
+    setSelectedSandboxId(sandboxId ?? null);
   };
 
   const handleConversationTitleChange = async (
@@ -106,7 +127,10 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
 
   const handleConfirmStop = () => {
     if (selectedConversationId) {
-      stopConversation({ conversationId: selectedConversationId });
+      pauseConversationSandbox({
+        conversationId: selectedConversationId,
+        version: selectedConversationVersion,
+      });
     }
   };
 
@@ -122,22 +146,36 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
       className="w-full md:w-[400px] h-full border border-[#525252] bg-[#25272D] rounded-lg overflow-y-auto absolute custom-scrollbar-always"
     >
       {isFetching && conversations.length === 0 && (
-        <div className="w-full h-full absolute flex justify-center items-center">
-          <LoadingSpinner size="small" />
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <ConversationCardSkeleton key={index} />
+          ))}
         </div>
       )}
+
       {error && (
         <div className="flex flex-col items-center justify-center h-full">
           <p className="text-danger">{error.message}</p>
         </div>
       )}
-      {!isFetching && conversations?.length === 0 && (
+      {!isFetching && conversations?.length === 0 && !startTasks?.length && (
         <div className="flex flex-col items-center justify-center h-full">
           <p className="text-neutral-400">
             {t(I18nKey.CONVERSATION$NO_CONVERSATIONS)}
           </p>
         </div>
       )}
+      {/* Render in-progress start tasks first */}
+      {startTasks?.map((task) => (
+        <NavLink
+          key={task.id}
+          to={`/conversations/task-${task.id}`}
+          onClick={onClose}
+        >
+          <StartTaskCard task={task} />
+        </NavLink>
+      ))}
+      {/* Then render completed conversations */}
       {conversations?.map((project) => (
         <NavLink
           key={project.conversation_id}
@@ -145,8 +183,16 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
           onClick={onClose}
         >
           <ConversationCard
-            onDelete={() => handleDeleteProject(project.conversation_id)}
-            onStop={() => handleStopConversation(project.conversation_id)}
+            onDelete={() =>
+              handleDeleteProject(project.conversation_id, project.title)
+            }
+            onStop={() =>
+              handleStopConversation(
+                project.conversation_id,
+                project.conversation_version,
+                project.sandbox_id,
+              )
+            }
             onChangeTitle={(title) =>
               handleConversationTitleChange(project.conversation_id, title)
             }
@@ -160,6 +206,7 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
             createdAt={project.created_at}
             conversationStatus={project.status}
             conversationId={project.conversation_id}
+            conversationVersion={project.conversation_version}
             contextMenuOpen={openContextMenuId === project.conversation_id}
             onContextMenuToggle={(isOpen) =>
               setOpenContextMenuId(isOpen ? project.conversation_id : null)
@@ -180,8 +227,13 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
           onConfirm={() => {
             handleConfirmDelete();
             setConfirmDeleteModalVisible(false);
+            setSelectedConversationTitle(null);
           }}
-          onCancel={() => setConfirmDeleteModalVisible(false)}
+          onCancel={() => {
+            setConfirmDeleteModalVisible(false);
+            setSelectedConversationTitle(null);
+          }}
+          conversationTitle={selectedConversationTitle ?? undefined}
         />
       )}
 
@@ -192,6 +244,7 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
             setConfirmStopModalVisible(false);
           }}
           onCancel={() => setConfirmStopModalVisible(false)}
+          sandboxId={selectedSandboxId}
         />
       )}
 
@@ -201,6 +254,7 @@ export function ConversationPanel({ onClose }: ConversationPanelProps) {
             onClose();
           }}
           onClose={() => setConfirmExitConversationModalVisible(false)}
+          onCancel={() => setConfirmExitConversationModalVisible(false)}
         />
       )}
     </div>

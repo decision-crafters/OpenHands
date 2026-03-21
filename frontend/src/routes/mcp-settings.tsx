@@ -11,6 +11,9 @@ import { MCPServerForm } from "#/components/features/settings/mcp-settings/mcp-s
 import { ConfirmationModal } from "#/components/shared/modals/confirmation-modal";
 import { BrandButton } from "#/components/features/settings/brand-button";
 import { MCPConfig } from "#/types/settings";
+import { createPermissionGuard } from "#/utils/org/permission-guard";
+
+export const clientLoader = createPermissionGuard("manage_mcp");
 
 type MCPServerType = "sse" | "stdio" | "shttp";
 
@@ -41,7 +44,7 @@ function MCPSettingsScreen() {
     useState(false);
   const [serverToDelete, setServerToDelete] = useState<string | null>(null);
 
-  const mcpConfig: MCPConfig = settings?.MCP_CONFIG || {
+  const mcpConfig: MCPConfig = settings?.mcp_config || {
     sse_servers: [],
     stdio_servers: [],
     shttp_servers: [],

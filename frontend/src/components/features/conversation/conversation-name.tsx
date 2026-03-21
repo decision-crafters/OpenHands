@@ -9,10 +9,12 @@ import { I18nKey } from "#/i18n/declaration";
 import { EllipsisButton } from "../conversation-panel/ellipsis-button";
 import { ConversationNameContextMenu } from "./conversation-name-context-menu";
 import { SystemMessageModal } from "../conversation-panel/system-message-modal";
-import { MicroagentsModal } from "../conversation-panel/microagents-modal";
+import { SkillsModal } from "../conversation-panel/skills-modal";
+import { HooksModal } from "../conversation-panel/hooks-modal";
 import { ConfirmDeleteModal } from "../conversation-panel/confirm-delete-modal";
 import { ConfirmStopModal } from "../conversation-panel/confirm-stop-modal";
 import { MetricsModal } from "./metrics-modal/metrics-modal";
+import { ConversationVersionBadge } from "../conversation-panel/conversation-card/conversation-version-badge";
 
 export function ConversationName() {
   const { t } = useTranslation();
@@ -29,18 +31,25 @@ export function ConversationName() {
     handleDelete,
     handleStop,
     handleDownloadViaVSCode,
+    handleDownloadConversation,
     handleDisplayCost,
     handleShowAgentTools,
-    handleShowMicroagents,
+    handleShowSkills,
+    handleShowHooks,
     handleExportConversation,
+    handleTogglePublic,
+    handleCopyShareLink,
+    shareUrl,
     handleConfirmDelete,
     handleConfirmStop,
     metricsModalVisible,
     setMetricsModalVisible,
     systemModalVisible,
     setSystemModalVisible,
-    microagentsModalVisible,
-    setMicroagentsModalVisible,
+    skillsModalVisible,
+    setSkillsModalVisible,
+    hooksModalVisible,
+    setHooksModalVisible,
     confirmDeleteModalVisible,
     setConfirmDeleteModalVisible,
     confirmStopModalVisible,
@@ -49,9 +58,11 @@ export function ConversationName() {
     shouldShowStop,
     shouldShowDownload,
     shouldShowExport,
+    shouldShowDownloadConversation,
     shouldShowDisplayCost,
     shouldShowAgentTools,
-    shouldShowMicroagents,
+    shouldShowSkills,
+    shouldShowHooks,
   } = useConversationNameContextMenu({
     conversationId,
     conversationStatus: conversation?.status,
@@ -85,6 +96,10 @@ export function ConversationName() {
   };
 
   const handleKeyUp = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    // Ignore Enter key during IME composition (e.g., Chinese, Japanese, Korean input)
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
     if (event.key === "Enter") {
       event.currentTarget.blur();
     }
@@ -123,7 +138,7 @@ export function ConversationName() {
   return (
     <>
       <div
-        className="flex items-center gap-2 h-[22px] text-base font-normal text-left pl-0 lg:pl-3.5"
+        className="flex items-center gap-2 h-[22px] text-base font-normal text-left pl-0 lg:pl-1"
         data-testid="conversation-name"
       >
         {titleMode === "edit" ? (
@@ -149,6 +164,12 @@ export function ConversationName() {
         )}
 
         {titleMode !== "edit" && (
+          <ConversationVersionBadge
+            version={conversation.conversation_version}
+          />
+        )}
+
+        {titleMode !== "edit" && (
           <div className="relative flex items-center">
             <EllipsisButton fill="#B1B9D3" onClick={handleEllipsisClick} />
             {contextMenuOpen && (
@@ -163,14 +184,21 @@ export function ConversationName() {
                 onShowAgentTools={
                   shouldShowAgentTools ? handleShowAgentTools : undefined
                 }
-                onShowMicroagents={
-                  shouldShowMicroagents ? handleShowMicroagents : undefined
-                }
+                onShowSkills={shouldShowSkills ? handleShowSkills : undefined}
+                onShowHooks={shouldShowHooks ? handleShowHooks : undefined}
                 onExportConversation={
                   shouldShowExport ? handleExportConversation : undefined
                 }
                 onDownloadViaVSCode={
                   shouldShowDownload ? handleDownloadViaVSCode : undefined
+                }
+                onTogglePublic={handleTogglePublic}
+                shareUrl={shareUrl}
+                onCopyShareLink={handleCopyShareLink}
+                onDownloadConversation={
+                  shouldShowDownloadConversation
+                    ? handleDownloadConversation
+                    : undefined
                 }
                 position="bottom"
               />
@@ -189,12 +217,17 @@ export function ConversationName() {
       <SystemMessageModal
         isOpen={systemModalVisible}
         onClose={() => setSystemModalVisible(false)}
-        systemMessage={systemMessage ? systemMessage.args : null}
+        systemMessage={systemMessage || null}
       />
 
-      {/* Microagents Modal */}
-      {microagentsModalVisible && (
-        <MicroagentsModal onClose={() => setMicroagentsModalVisible(false)} />
+      {/* Skills Modal */}
+      {skillsModalVisible && (
+        <SkillsModal onClose={() => setSkillsModalVisible(false)} />
+      )}
+
+      {/* Hooks Modal */}
+      {hooksModalVisible && (
+        <HooksModal onClose={() => setHooksModalVisible(false)} />
       )}
 
       {/* Confirm Delete Modal */}
@@ -202,6 +235,7 @@ export function ConversationName() {
         <ConfirmDeleteModal
           onConfirm={handleConfirmDelete}
           onCancel={() => setConfirmDeleteModalVisible(false)}
+          conversationTitle={conversation?.title}
         />
       )}
 
@@ -210,6 +244,7 @@ export function ConversationName() {
         <ConfirmStopModal
           onConfirm={handleConfirmStop}
           onCancel={() => setConfirmStopModalVisible(false)}
+          sandboxId={conversation?.sandbox_id ?? null}
         />
       )}
     </>

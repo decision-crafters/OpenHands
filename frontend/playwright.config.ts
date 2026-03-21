@@ -30,6 +30,9 @@ export default defineConfig({
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: "on-first-retry",
+    /* Ignore SSL errors for browser agent test */
+    /* Solution inspired by StackOverflow post: https://stackoverflow.com/questions/67048422/ignore-ssl-errors-with-playwright-code-generation */
+    ignoreHTTPSErrors: true,
   },
 
   /* Configure projects for major browsers */
@@ -72,7 +75,7 @@ export default defineConfig({
 
   /* Run your local dev server before starting the tests */
   webServer: {
-    command: "npm run dev:mock -- --port 3001",
+    command: "npm run dev:mock:saas -- --port 3001",
     url: "http://localhost:3001/",
     reuseExistingServer: !process.env.CI,
   },

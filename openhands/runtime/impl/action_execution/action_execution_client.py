@@ -1,3 +1,10 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
 import os
 import tempfile
 import threading
@@ -129,11 +136,15 @@ class ActionExecutionClient(Runtime):
         return send_request(self.session, method, url, **kwargs)
 
     def check_if_alive(self) -> None:
+        request_url = f'{self.action_execution_server_url}/alive'
+        self.log('debug', f'Sending request to: {request_url}')
         response = self._send_action_server_request(
             'GET',
-            f'{self.action_execution_server_url}/alive',
+            request_url,
             timeout=5,
         )
+        self.log('debug', f'Response status code: {response.status_code}')
+        self.log('debug', f'Response text: {response.text}')
         assert response.is_closed
 
     def list_files(self, path: str | None = None) -> list[str]:

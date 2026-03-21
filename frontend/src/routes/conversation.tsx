@@ -1,128 +1,124 @@
 import React from "react";
 import { useNavigate } from "react-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { useConversationId } from "#/hooks/use-conversation-id";
-import { useCommandStore } from "#/state/command-store";
-import { useEffectOnce } from "#/hooks/use-effect-once";
-import { useJupyterStore } from "#/state/jupyter-store";
-import { useConversationStore } from "#/state/conversation-store";
+import { useCommandStore } from "#/stores/command-store";
+import { useConversationStore } from "#/stores/conversation-store";
 import { useAgentStore } from "#/stores/agent-store";
 import { AgentState } from "#/types/agent-state";
 
 import { useBatchFeedback } from "#/hooks/query/use-batch-feedback";
-import { WsClientProvider } from "#/context/ws-client-provider";
 import { EventHandler } from "../wrapper/event-handler";
 import { useConversationConfig } from "#/hooks/query/use-conversation-config";
 
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
+import { useTaskPolling } from "#/hooks/query/use-task-polling";
 
 import { displayErrorToast } from "#/utils/custom-toast-handlers";
-import { useDocumentTitleFromState } from "#/hooks/use-document-title-from-state";
 import { useIsAuthed } from "#/hooks/query/use-is-authed";
 import { ConversationSubscriptionsProvider } from "#/context/conversation-subscriptions-provider";
-import { useUserProviders } from "#/hooks/use-user-providers";
 
 import { ConversationMain } from "#/components/features/conversation/conversation-main/conversation-main";
-import { ConversationName } from "#/components/features/conversation/conversation-name";
+import { ConversationNameWithStatus } from "#/components/features/conversation/conversation-name-with-status";
 
 import { ConversationTabs } from "#/components/features/conversation/conversation-tabs/conversation-tabs";
-import { useStartConversation } from "#/hooks/mutation/use-start-conversation";
+import { WebSocketProviderWrapper } from "#/contexts/websocket-provider-wrapper";
+import { useErrorMessageStore } from "#/stores/error-message-store";
+import { I18nKey } from "#/i18n/declaration";
+import { useEventStore } from "#/stores/use-event-store";
 
 function AppContent() {
   useConversationConfig();
-
+  const { t } = useTranslation();
   const { conversationId } = useConversationId();
-  const { data: conversation, isFetched, refetch } = useActiveConversation();
-  const { mutate: startConversation } = useStartConversation();
+  const clearEvents = useEventStore((state) => state.clearEvents);
+
+  // Handle both task IDs (task-{uuid}) and regular conversation IDs
+  const { isTask, taskStatus, taskDetail } = useTaskPolling();
+
+  const { data: conversation, isFetched } = useActiveConversation();
   const { data: isAuthed } = useIsAuthed();
-  const { providers } = useUserProviders();
   const { resetConversationState } = useConversationStore();
   const navigate = useNavigate();
   const clearTerminal = useCommandStore((state) => state.clearTerminal);
   const setCurrentAgentState = useAgentStore(
     (state) => state.setCurrentAgentState,
   );
-  const clearJupyter = useJupyterStore((state) => state.clearJupyter);
-  const queryClient = useQueryClient();
+  const removeErrorMessage = useErrorMessageStore(
+    (state) => state.removeErrorMessage,
+  );
 
   // Fetch batch feedback data when conversation is loaded
   useBatchFeedback();
 
-  // Set the document title to the conversation title when available
-  useDocumentTitleFromState();
-
-  // Force fresh conversation data when navigating to prevent stale cache issues
-  React.useEffect(() => {
-    queryClient.invalidateQueries({
-      queryKey: ["user", "conversation", conversationId],
-    });
-  }, [conversationId, queryClient]);
-
-  React.useEffect(() => {
-    if (isFetched && !conversation && isAuthed) {
-      displayErrorToast(
-        "This conversation does not exist, or you do not have permission to access it.",
-      );
-      navigate("/");
-    } else if (conversation?.status === "STOPPED") {
-      // If conversation is STOPPED, attempt to start it
-      startConversation(
-        { conversationId: conversation.conversation_id, providers },
-        {
-          onError: (error) => {
-            displayErrorToast(`Failed to start conversation: ${error.message}`);
-            // Refetch the conversation to ensure UI consistency
-            refetch();
-          },
-        },
-      );
-    }
-  }, [
-    conversation?.conversation_id,
-    conversation?.status,
-    isFetched,
-    isAuthed,
-    providers,
-  ]);
-
+  // 1. Cleanup Effect - runs when navigating to a different conversation
   React.useEffect(() => {
     clearTerminal();
-    clearJupyter();
     resetConversationState();
     setCurrentAgentState(AgentState.LOADING);
+    removeErrorMessage();
+    clearEvents();
   }, [
     conversationId,
     clearTerminal,
-    setCurrentAgentState,
     resetConversationState,
+    setCurrentAgentState,
+    removeErrorMessage,
+    clearEvents,
   ]);
 
-  useEffectOnce(() => {
-    clearTerminal();
-    clearJupyter();
-    resetConversationState();
-    setCurrentAgentState(AgentState.LOADING);
-  });
+  // 2. Task Error Display Effect
+  React.useEffect(() => {
+    if (isTask && taskStatus === "ERROR") {
+      displayErrorToast(
+        taskDetail || t(I18nKey.CONVERSATION$FAILED_TO_START_FROM_TASK),
+      );
+    }
+  }, [isTask, taskStatus, taskDetail, t]);
 
-  return (
-    <WsClientProvider conversationId={conversationId}>
-      <ConversationSubscriptionsProvider>
-        <EventHandler>
-          <div
-            data-testid="app-route"
-            className="p-3 md:p-0 flex flex-col h-full gap-3"
-          >
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4.5 pt-2 lg:pt-0">
-              <ConversationName />
-              <ConversationTabs />
-            </div>
+  // 3. Handle conversation not found
+  // NOTE: Resuming STOPPED conversations is handled by useSandboxRecovery in WebSocketProviderWrapper
+  React.useEffect(() => {
+    // Wait for data to be fetched
+    if (!isFetched || !isAuthed) return;
 
-            <ConversationMain />
+    // Handle conversation not found
+    if (!conversation) {
+      displayErrorToast(t(I18nKey.CONVERSATION$NOT_EXIST_OR_NO_PERMISSION));
+      navigate("/");
+    }
+  }, [conversation, isFetched, isAuthed, navigate, t]);
+
+  const isV0Conversation = conversation?.conversation_version === "V0";
+
+  const content = (
+    <ConversationSubscriptionsProvider>
+      <EventHandler>
+        <div
+          data-testid="app-route"
+          className="p-3 md:p-0 flex flex-col h-full gap-3"
+        >
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4.5 pt-2 lg:pt-0">
+            <ConversationNameWithStatus />
+            <ConversationTabs />
           </div>
-        </EventHandler>
-      </ConversationSubscriptionsProvider>
-    </WsClientProvider>
+
+          <ConversationMain />
+        </div>
+      </EventHandler>
+    </ConversationSubscriptionsProvider>
+  );
+
+  // Render WebSocket provider immediately to avoid mount/remount cycles
+  // The providers internally handle waiting for conversation data to be ready
+  return (
+    <WebSocketProviderWrapper
+      version={isV0Conversation ? 0 : 1}
+      conversationId={conversationId}
+    >
+      {content}
+    </WebSocketProviderWrapper>
   );
 }
 

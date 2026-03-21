@@ -7,8 +7,14 @@ export const usePaginatedConversations = (limit: number = 20) => {
 
   return useInfiniteQuery({
     queryKey: ["user", "conversations", "paginated", limit],
-    queryFn: ({ pageParam }) =>
-      ConversationService.getUserConversations(limit, pageParam),
+    queryFn: async ({ pageParam }) => {
+      const result = await ConversationService.getUserConversations(
+        limit,
+        pageParam,
+      );
+
+      return result;
+    },
     enabled: !!userIsAuthenticated,
     getNextPageParam: (lastPage) => lastPage.next_page_id,
     initialPageParam: undefined as string | undefined,

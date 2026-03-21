@@ -1,5 +1,6 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
+import { usePostHog } from "posthog-js/react";
 import { useSaveSettings } from "#/hooks/mutation/use-save-settings";
 import { useSettings } from "#/hooks/query/use-settings";
 import { AvailableLanguages } from "#/i18n";
@@ -7,6 +8,7 @@ import { DEFAULT_SETTINGS } from "#/services/settings";
 import { BrandButton } from "#/components/features/settings/brand-button";
 import { SettingsSwitch } from "#/components/features/settings/settings-switch";
 import { SettingsInput } from "#/components/features/settings/settings-input";
+import { SettingsDropdownInput } from "#/components/features/settings/settings-dropdown-input";
 import { I18nKey } from "#/i18n/declaration";
 import { LanguageInput } from "#/components/features/settings/app-settings/language-input";
 import { handleCaptureConsent } from "#/utils/handle-capture-consent";
@@ -18,8 +20,19 @@ import { retrieveAxiosErrorMessage } from "#/utils/retrieve-axios-error-message"
 import { AppSettingsInputsSkeleton } from "#/components/features/settings/app-settings/app-settings-inputs-skeleton";
 import { useConfig } from "#/hooks/query/use-config";
 import { parseMaxBudgetPerTask } from "#/utils/settings-utils";
+import {
+  SandboxGroupingStrategy,
+  SandboxGroupingStrategyOptions,
+} from "#/types/settings";
+import { ENABLE_SANDBOX_GROUPING } from "#/utils/feature-flags";
+import { createPermissionGuard } from "#/utils/org/permission-guard";
+
+export const clientLoader = createPermissionGuard(
+  "manage_application_settings",
+);
 
 function AppSettingsScreen() {
+  const posthog = usePostHog();
   const { t } = useTranslation();
 
   const { mutate: saveSettings, isPending } = useSaveSettings();
@@ -42,6 +55,12 @@ function AppSettingsScreen() {
     solvabilityAnalysisSwitchHasChanged,
     setSolvabilityAnalysisSwitchHasChanged,
   ] = React.useState(false);
+  const [
+    sandboxGroupingStrategyHasChanged,
+    setSandboxGroupingStrategyHasChanged,
+  ] = React.useState(false);
+  const [selectedSandboxGroupingStrategy, setSelectedSandboxGroupingStrategy] =
+    React.useState<SandboxGroupingStrategy | null>(null);
   const [maxBudgetPerTaskHasChanged, setMaxBudgetPerTaskHasChanged] =
     React.useState(false);
   const [gitUserNameHasChanged, setGitUserNameHasChanged] =
@@ -54,7 +73,7 @@ function AppSettingsScreen() {
     const languageValue = AvailableLanguages.find(
       ({ label }) => label === languageLabel,
     )?.value;
-    const language = languageValue || DEFAULT_SETTINGS.LANGUAGE;
+    const language = languageValue || DEFAULT_SETTINGS.language;
 
     const enableAnalytics =
       formData.get("enable-analytics-switch")?.toString() === "on";
@@ -68,6 +87,11 @@ function AppSettingsScreen() {
     const enableSolvabilityAnalysis =
       formData.get("enable-solvability-analysis-switch")?.toString() === "on";
 
+    const sandboxGroupingStrategy =
+      selectedSandboxGroupingStrategy ||
+      settings?.sandbox_grouping_strategy ||
+      DEFAULT_SETTINGS.sandbox_grouping_strategy;
+
     const maxBudgetPerTaskValue = formData
       .get("max-budget-per-task-input")
       ?.toString();
@@ -75,25 +99,26 @@ function AppSettingsScreen() {
 
     const gitUserName =
       formData.get("git-user-name-input")?.toString() ||
-      DEFAULT_SETTINGS.GIT_USER_NAME;
+      DEFAULT_SETTINGS.git_user_name;
     const gitUserEmail =
       formData.get("git-user-email-input")?.toString() ||
-      DEFAULT_SETTINGS.GIT_USER_EMAIL;
+      DEFAULT_SETTINGS.git_user_email;
 
     saveSettings(
       {
-        LANGUAGE: language,
+        language,
         user_consents_to_analytics: enableAnalytics,
-        ENABLE_SOUND_NOTIFICATIONS: enableSoundNotifications,
-        ENABLE_PROACTIVE_CONVERSATION_STARTERS: enableProactiveConversations,
-        ENABLE_SOLVABILITY_ANALYSIS: enableSolvabilityAnalysis,
-        MAX_BUDGET_PER_TASK: maxBudgetPerTask,
-        GIT_USER_NAME: gitUserName,
-        GIT_USER_EMAIL: gitUserEmail,
+        enable_sound_notifications: enableSoundNotifications,
+        enable_proactive_conversation_starters: enableProactiveConversations,
+        enable_solvability_analysis: enableSolvabilityAnalysis,
+        sandbox_grouping_strategy: sandboxGroupingStrategy,
+        max_budget_per_task: maxBudgetPerTask,
+        git_user_name: gitUserName,
+        git_user_email: gitUserEmail,
       },
       {
         onSuccess: () => {
-          handleCaptureConsent(enableAnalytics);
+          handleCaptureConsent(posthog, enableAnalytics);
           displaySuccessToast(t(I18nKey.SETTINGS$SAVED));
         },
         onError: (error) => {
@@ -105,6 +130,8 @@ function AppSettingsScreen() {
           setAnalyticsSwitchHasChanged(false);
           setSoundNotificationsSwitchHasChanged(false);
           setProactiveConversationsSwitchHasChanged(false);
+          setSandboxGroupingStrategyHasChanged(false);
+          setSelectedSandboxGroupingStrategy(null);
           setMaxBudgetPerTaskHasChanged(false);
           setGitUserNameHasChanged(false);
           setGitUserEmailHasChanged(false);
@@ -118,19 +145,20 @@ function AppSettingsScreen() {
       ({ label: langValue }) => langValue === value,
     )?.label;
     const currentLanguage = AvailableLanguages.find(
-      ({ value: langValue }) => langValue === settings?.LANGUAGE,
+      ({ value: langValue }) => langValue === settings?.language,
     )?.label;
 
     setLanguageInputHasChanged(selectedLanguage !== currentLanguage);
   };
 
   const checkIfAnalyticsSwitchHasChanged = (checked: boolean) => {
-    const currentAnalytics = !!settings?.USER_CONSENTS_TO_ANALYTICS;
+    // Treat null as true since analytics is opt-in by default
+    const currentAnalytics = settings?.user_consents_to_analytics ?? true;
     setAnalyticsSwitchHasChanged(checked !== currentAnalytics);
   };
 
   const checkIfSoundNotificationsSwitchHasChanged = (checked: boolean) => {
-    const currentSoundNotifications = !!settings?.ENABLE_SOUND_NOTIFICATIONS;
+    const currentSoundNotifications = !!settings?.enable_sound_notifications;
     setSoundNotificationsSwitchHasChanged(
       checked !== currentSoundNotifications,
     );
@@ -138,32 +166,41 @@ function AppSettingsScreen() {
 
   const checkIfProactiveConversationsSwitchHasChanged = (checked: boolean) => {
     const currentProactiveConversations =
-      !!settings?.ENABLE_PROACTIVE_CONVERSATION_STARTERS;
+      !!settings?.enable_proactive_conversation_starters;
     setProactiveConversationsSwitchHasChanged(
       checked !== currentProactiveConversations,
     );
   };
 
   const checkIfSolvabilityAnalysisSwitchHasChanged = (checked: boolean) => {
-    const currentSolvabilityAnalysis = !!settings?.ENABLE_SOLVABILITY_ANALYSIS;
+    const currentSolvabilityAnalysis = !!settings?.enable_solvability_analysis;
     setSolvabilityAnalysisSwitchHasChanged(
       checked !== currentSolvabilityAnalysis,
     );
   };
 
+  const handleSandboxGroupingStrategyChange = (key: React.Key | null) => {
+    const newStrategy = key?.toString() as SandboxGroupingStrategy | undefined;
+    setSelectedSandboxGroupingStrategy(newStrategy || null);
+    const currentStrategy =
+      settings?.sandbox_grouping_strategy ||
+      DEFAULT_SETTINGS.sandbox_grouping_strategy;
+    setSandboxGroupingStrategyHasChanged(newStrategy !== currentStrategy);
+  };
+
   const checkIfMaxBudgetPerTaskHasChanged = (value: string) => {
     const newValue = parseMaxBudgetPerTask(value);
-    const currentValue = settings?.MAX_BUDGET_PER_TASK;
+    const currentValue = settings?.max_budget_per_task;
     setMaxBudgetPerTaskHasChanged(newValue !== currentValue);
   };
 
   const checkIfGitUserNameHasChanged = (value: string) => {
-    const currentValue = settings?.GIT_USER_NAME;
+    const currentValue = settings?.git_user_name;
     setGitUserNameHasChanged(value !== currentValue);
   };
 
   const checkIfGitUserEmailHasChanged = (value: string) => {
-    const currentValue = settings?.GIT_USER_EMAIL;
+    const currentValue = settings?.git_user_email;
     setGitUserEmailHasChanged(value !== currentValue);
   };
 
@@ -173,6 +210,7 @@ function AppSettingsScreen() {
     !soundNotificationsSwitchHasChanged &&
     !proactiveConversationsSwitchHasChanged &&
     !solvabilityAnalysisSwitchHasChanged &&
+    !sandboxGroupingStrategyHasChanged &&
     !maxBudgetPerTaskHasChanged &&
     !gitUserNameHasChanged &&
     !gitUserEmailHasChanged;
@@ -190,14 +228,14 @@ function AppSettingsScreen() {
         <div className="flex flex-col gap-6">
           <LanguageInput
             name="language-input"
-            defaultKey={settings.LANGUAGE}
+            defaultKey={settings.language}
             onChange={checkIfLanguageInputHasChanged}
           />
 
           <SettingsSwitch
             testId="enable-analytics-switch"
             name="enable-analytics-switch"
-            defaultIsToggled={!!settings.USER_CONSENTS_TO_ANALYTICS}
+            defaultIsToggled={settings.user_consents_to_analytics ?? true}
             onToggle={checkIfAnalyticsSwitchHasChanged}
           >
             {t(I18nKey.ANALYTICS$SEND_ANONYMOUS_DATA)}
@@ -206,18 +244,18 @@ function AppSettingsScreen() {
           <SettingsSwitch
             testId="enable-sound-notifications-switch"
             name="enable-sound-notifications-switch"
-            defaultIsToggled={!!settings.ENABLE_SOUND_NOTIFICATIONS}
+            defaultIsToggled={!!settings.enable_sound_notifications}
             onToggle={checkIfSoundNotificationsSwitchHasChanged}
           >
             {t(I18nKey.SETTINGS$SOUND_NOTIFICATIONS)}
           </SettingsSwitch>
 
-          {config?.APP_MODE === "saas" && (
+          {config?.app_mode === "saas" && (
             <SettingsSwitch
               testId="enable-proactive-conversations-switch"
               name="enable-proactive-conversations-switch"
               defaultIsToggled={
-                !!settings.ENABLE_PROACTIVE_CONVERSATION_STARTERS
+                !!settings.enable_proactive_conversation_starters
               }
               onToggle={checkIfProactiveConversationsSwitchHasChanged}
             >
@@ -225,29 +263,51 @@ function AppSettingsScreen() {
             </SettingsSwitch>
           )}
 
-          {config?.APP_MODE === "saas" && (
+          {config?.app_mode === "saas" && (
             <SettingsSwitch
               testId="enable-solvability-analysis-switch"
               name="enable-solvability-analysis-switch"
-              defaultIsToggled={!!settings.ENABLE_SOLVABILITY_ANALYSIS}
+              defaultIsToggled={!!settings.enable_solvability_analysis}
               onToggle={checkIfSolvabilityAnalysisSwitchHasChanged}
             >
               {t(I18nKey.SETTINGS$SOLVABILITY_ANALYSIS)}
             </SettingsSwitch>
           )}
 
-          <SettingsInput
-            testId="max-budget-per-task-input"
-            name="max-budget-per-task-input"
-            type="number"
-            label={t(I18nKey.SETTINGS$MAX_BUDGET_PER_CONVERSATION)}
-            defaultValue={settings.MAX_BUDGET_PER_TASK?.toString() || ""}
-            onChange={checkIfMaxBudgetPerTaskHasChanged}
-            placeholder={t(I18nKey.SETTINGS$MAXIMUM_BUDGET_USD)}
-            min={1}
-            step={1}
-            className="w-full max-w-[680px]" // Match the width of the language field
-          />
+          {ENABLE_SANDBOX_GROUPING() && (
+            <SettingsDropdownInput
+              testId="sandbox-grouping-strategy-input"
+              name="sandbox-grouping-strategy-input"
+              label={t(I18nKey.SETTINGS$SANDBOX_GROUPING_STRATEGY)}
+              items={Object.keys(SandboxGroupingStrategyOptions).map((key) => ({
+                key,
+                label: t(`SETTINGS$SANDBOX_GROUPING_${key}` as I18nKey),
+              }))}
+              selectedKey={
+                selectedSandboxGroupingStrategy ||
+                settings.sandbox_grouping_strategy ||
+                DEFAULT_SETTINGS.sandbox_grouping_strategy
+              }
+              isClearable={false}
+              onSelectionChange={handleSandboxGroupingStrategyChange}
+              wrapperClassName="w-full max-w-[680px]"
+            />
+          )}
+
+          {!settings?.v1_enabled && (
+            <SettingsInput
+              testId="max-budget-per-task-input"
+              name="max-budget-per-task-input"
+              type="number"
+              label={t(I18nKey.SETTINGS$MAX_BUDGET_PER_CONVERSATION)}
+              defaultValue={settings.max_budget_per_task?.toString() || ""}
+              onChange={checkIfMaxBudgetPerTaskHasChanged}
+              placeholder={t(I18nKey.SETTINGS$MAXIMUM_BUDGET_USD)}
+              min={1}
+              step={1}
+              className="w-full max-w-[680px]" // Match the width of the language field
+            />
+          )}
 
           <div className="border-t border-t-tertiary pt-6 mt-2">
             <h3 className="text-lg font-medium mb-2">
@@ -262,7 +322,7 @@ function AppSettingsScreen() {
                 name="git-user-name-input"
                 type="text"
                 label={t(I18nKey.SETTINGS$GIT_USERNAME)}
-                defaultValue={settings.GIT_USER_NAME || ""}
+                defaultValue={settings.git_user_name || ""}
                 onChange={checkIfGitUserNameHasChanged}
                 placeholder="Username for git commits"
                 className="w-full max-w-[680px]"
@@ -272,7 +332,7 @@ function AppSettingsScreen() {
                 name="git-user-email-input"
                 type="email"
                 label={t(I18nKey.SETTINGS$GIT_EMAIL)}
-                defaultValue={settings.GIT_USER_EMAIL || ""}
+                defaultValue={settings.git_user_email || ""}
                 onChange={checkIfGitUserEmailHasChanged}
                 placeholder="Email for git commits"
                 className="w-full max-w-[680px]"

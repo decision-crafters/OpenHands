@@ -1,14 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import { it, describe, expect, vi, beforeEach, afterEach } from "vitest";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import AcceptTOS from "#/routes/accept-tos";
 import * as CaptureConsent from "#/utils/handle-capture-consent";
-import * as ToastHandlers from "#/utils/custom-toast-handlers";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { openHands } from "#/api/open-hands-axios";
+import { useSelectedOrganizationStore } from "#/stores/selected-organization-store";
 
 // Mock the react-router hooks
-vi.mock("react-router", () => ({
+vi.mock("react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router")>()),
   useNavigate: () => vi.fn(),
   useSearchParams: () => [
     {
@@ -20,6 +21,7 @@ vi.mock("react-router", () => ({
       },
     },
   ],
+  useRevalidator: () => ({ revalidate: vi.fn() }),
 }));
 
 // Mock the axios instance
@@ -44,13 +46,18 @@ const createWrapper = () => {
     },
   });
 
-  return ({ children }: { children: React.ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-  );
+  function Wrapper({ children }: { children: React.ReactNode }) {
+    return (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+  }
+
+  return Wrapper;
 };
 
 describe("AcceptTOS", () => {
   beforeEach(() => {
+    useSelectedOrganizationStore.setState({ organizationId: "test-org-id" });
     vi.stubGlobal("location", { href: "" });
   });
 
@@ -106,7 +113,10 @@ describe("AcceptTOS", () => {
     // Wait for the mutation to complete
     await new Promise(process.nextTick);
 
-    expect(handleCaptureConsentSpy).toHaveBeenCalledWith(true);
+    expect(handleCaptureConsentSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      true,
+    );
     expect(openHands.post).toHaveBeenCalledWith("/api/accept_tos", {
       redirect_url: "/dashboard",
     });

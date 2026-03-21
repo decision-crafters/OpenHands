@@ -1,7 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSettings } from "#/hooks/query/use-settings";
-import SettingsService from "#/settings-service/settings-service.api";
+import SettingsService from "#/api/settings-service/settings-service.api";
 import { MCPSSEServer, MCPStdioServer, MCPSHTTPServer } from "#/types/settings";
+import { useSelectedOrganizationId } from "#/context/use-selected-organization";
 
 type MCPServerType = "sse" | "stdio" | "shttp";
 
@@ -19,6 +20,7 @@ interface MCPServerConfig {
 export function useUpdateMcpServer() {
   const queryClient = useQueryClient();
   const { data: settings } = useSettings();
+  const { organizationId } = useSelectedOrganizationId();
 
   return useMutation({
     mutationFn: async ({
@@ -28,9 +30,9 @@ export function useUpdateMcpServer() {
       serverId: string;
       server: MCPServerConfig;
     }): Promise<void> => {
-      if (!settings?.MCP_CONFIG) return;
+      if (!settings?.mcp_config) return;
 
-      const newConfig = { ...settings.MCP_CONFIG };
+      const newConfig = { ...settings.mcp_config };
       const [serverType, indexStr] = serverId.split("-");
       const index = parseInt(indexStr, 10);
 
@@ -59,13 +61,16 @@ export function useUpdateMcpServer() {
 
       const apiSettings = {
         mcp_config: newConfig,
+        v1_enabled: settings.v1_enabled,
       };
 
       await SettingsService.saveSettings(apiSettings);
     },
     onSuccess: () => {
       // Invalidate the settings query to trigger a refetch
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({
+        queryKey: ["settings", organizationId],
+      });
     },
   });
 }

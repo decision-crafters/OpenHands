@@ -18,9 +18,11 @@ from openhands.core.schema.agent import AgentState
 class TestLinearNewConversationView:
     """Tests for LinearNewConversationView"""
 
-    def test_get_instructions(self, new_conversation_view, mock_jinja_env):
+    async def test_get_instructions(self, new_conversation_view, mock_jinja_env):
         """Test _get_instructions method"""
-        instructions, user_msg = new_conversation_view._get_instructions(mock_jinja_env)
+        instructions, user_msg = await new_conversation_view._get_instructions(
+            mock_jinja_env
+        )
 
         assert instructions == 'Test instructions template'
         assert 'TEST-123' in user_msg
@@ -83,9 +85,9 @@ class TestLinearNewConversationView:
 class TestLinearExistingConversationView:
     """Tests for LinearExistingConversationView"""
 
-    def test_get_instructions(self, existing_conversation_view, mock_jinja_env):
+    async def test_get_instructions(self, existing_conversation_view, mock_jinja_env):
         """Test _get_instructions method"""
-        instructions, user_msg = existing_conversation_view._get_instructions(
+        instructions, user_msg = await existing_conversation_view._get_instructions(
             mock_jinja_env
         )
 
@@ -137,7 +139,9 @@ class TestLinearExistingConversationView:
     ):
         """Test conversation update with no metadata"""
         mock_store = AsyncMock()
-        mock_store.get_metadata.return_value = None
+        mock_store.get_metadata.side_effect = FileNotFoundError(
+            'No such file or directory'
+        )
         mock_store_impl.return_value = mock_store
 
         with pytest.raises(
@@ -307,7 +311,7 @@ class TestLinearViewEdgeCases:
         mock_agent_loop_info,
     ):
         """Test conversation creation when user has no secrets"""
-        new_conversation_view.saas_user_auth.get_user_secrets.return_value = None
+        new_conversation_view.saas_user_auth.get_secrets.return_value = None
         mock_create_conversation.return_value = mock_agent_loop_info
         mock_store.create_conversation = AsyncMock()
 

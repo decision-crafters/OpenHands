@@ -1,15 +1,19 @@
+import { cn } from "#/utils/utils";
+
 export type ConversationCardTitleMode = "view" | "edit";
 
 export type ConversationCardTitleProps = {
   titleMode: ConversationCardTitleMode;
   title: string;
   onSave: (title: string) => void;
+  isConversationArchived?: boolean;
 };
 
 export function ConversationCardTitle({
   titleMode,
   title,
   onSave,
+  isConversationArchived,
 }: ConversationCardTitleProps) {
   if (titleMode === "edit") {
     return (
@@ -26,6 +30,10 @@ export function ConversationCardTitle({
           onSave(trimmed);
         }}
         onKeyUp={(event: React.KeyboardEvent<HTMLInputElement>) => {
+          // Ignore Enter key during IME composition (e.g., Chinese, Japanese, Korean input)
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
           if (event.key === "Enter") {
             event.currentTarget.blur();
           }
@@ -40,7 +48,10 @@ export function ConversationCardTitle({
   return (
     <p
       data-testid="conversation-card-title"
-      className="text-xs leading-6 font-semibold bg-transparent truncate overflow-hidden"
+      className={cn(
+        "text-xs leading-6 font-semibold bg-transparent truncate overflow-hidden",
+        isConversationArchived && "opacity-60",
+      )}
       title={title}
     >
       {title}

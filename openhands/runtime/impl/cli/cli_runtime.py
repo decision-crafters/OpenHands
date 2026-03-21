@@ -1,3 +1,10 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
 """This runtime runs commands locally using subprocess and performs file operations using Python's standard library.
 It does not implement browser functionality.
 """
@@ -57,8 +64,8 @@ if TYPE_CHECKING:
 # Import Windows PowerShell support if on Windows
 if sys.platform == 'win32':
     try:
-        from openhands.runtime.utils.windows_bash import WindowsPowershellSession
         from openhands.runtime.utils.windows_exceptions import DotNetMissingError
+        from openhands.runtime.utils.windows_bash import WindowsPowershellSession  # isort: skip
     except (ImportError, DotNetMissingError) as err:
         # Print a user-friendly error message without stack trace
         friendly_message = """

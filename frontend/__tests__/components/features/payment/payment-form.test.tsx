@@ -27,17 +27,20 @@ describe("PaymentForm", () => {
   const renderPaymentForm = () => renderWithProviders(<PaymentForm />);
 
   beforeEach(() => {
-    // useBalance hook will return the balance only if the APP_MODE is "saas" and the billing feature is enabled
+    // useBalance hook will return the balance only if the app_mode is "saas" and the billing feature is enabled
+    // @ts-expect-error - partial mock for testing
     getConfigSpy.mockResolvedValue({
-      APP_MODE: "saas",
-      GITHUB_CLIENT_ID: "123",
-      POSTHOG_CLIENT_KEY: "456",
-      FEATURE_FLAGS: {
-        ENABLE_BILLING: true,
-        HIDE_LLM_SETTINGS: false,
-        ENABLE_JIRA: false,
-        ENABLE_JIRA_DC: false,
-        ENABLE_LINEAR: false,
+      app_mode: "saas",
+      posthog_client_key: "456",
+      feature_flags: {
+        enable_billing: true,
+        hide_llm_settings: false,
+        enable_jira: false,
+        enable_jira_dc: false,
+        enable_linear: false,
+        hide_users_page: false,
+        hide_billing_page: false,
+        hide_integrations_page: false,
       },
     });
   });
@@ -186,174 +189,6 @@ describe("PaymentForm", () => {
       await user.click(topUpButton);
 
       expect(mockMutate).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("Cancel Subscription", () => {
-    const getSubscriptionAccessSpy = vi.spyOn(
-      BillingService,
-      "getSubscriptionAccess",
-    );
-    const cancelSubscriptionSpy = vi.spyOn(
-      BillingService,
-      "cancelSubscription",
-    );
-
-    beforeEach(() => {
-      // Mock active subscription
-      getSubscriptionAccessSpy.mockResolvedValue({
-        start_at: "2024-01-01T00:00:00Z",
-        end_at: "2024-12-31T23:59:59Z",
-        created_at: "2024-01-01T00:00:00Z",
-      });
-    });
-
-    it("should render cancel subscription button when user has active subscription", async () => {
-      renderPaymentForm();
-
-      await waitFor(() => {
-        const cancelButton = screen.getByTestId("cancel-subscription-button");
-        expect(cancelButton).toBeInTheDocument();
-        expect(cancelButton).toHaveTextContent("PAYMENT$CANCEL_SUBSCRIPTION");
-      });
-    });
-
-    it("should not render cancel subscription button when user has no subscription", async () => {
-      getSubscriptionAccessSpy.mockResolvedValue(null);
-      renderPaymentForm();
-
-      await waitFor(() => {
-        const cancelButton = screen.queryByTestId("cancel-subscription-button");
-        expect(cancelButton).not.toBeInTheDocument();
-      });
-    });
-
-    it("should show confirmation modal when cancel subscription button is clicked", async () => {
-      const user = userEvent.setup();
-      renderPaymentForm();
-
-      const cancelButton = await screen.findByTestId(
-        "cancel-subscription-button",
-      );
-      await user.click(cancelButton);
-
-      // Should show confirmation modal
-      expect(
-        screen.getByTestId("cancel-subscription-modal"),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText("PAYMENT$CANCEL_SUBSCRIPTION_TITLE"),
-      ).toBeInTheDocument();
-      // The message should be rendered (either with Trans component or regular text)
-      const modalContent = screen.getByTestId("cancel-subscription-modal");
-      expect(modalContent).toBeInTheDocument();
-      expect(screen.getByTestId("confirm-cancel-button")).toBeInTheDocument();
-      expect(screen.getByTestId("modal-cancel-button")).toBeInTheDocument();
-    });
-
-    it("should close modal when cancel button in modal is clicked", async () => {
-      const user = userEvent.setup();
-      renderPaymentForm();
-
-      const cancelButton = await screen.findByTestId(
-        "cancel-subscription-button",
-      );
-      await user.click(cancelButton);
-
-      // Modal should be visible
-      expect(
-        screen.getByTestId("cancel-subscription-modal"),
-      ).toBeInTheDocument();
-
-      // Click cancel in modal
-      const modalCancelButton = screen.getByTestId("modal-cancel-button");
-      await user.click(modalCancelButton);
-
-      // Modal should be closed
-      expect(
-        screen.queryByTestId("cancel-subscription-modal"),
-      ).not.toBeInTheDocument();
-    });
-
-    it("should call cancel subscription API when confirm button is clicked", async () => {
-      const user = userEvent.setup();
-      renderPaymentForm();
-
-      const cancelButton = await screen.findByTestId(
-        "cancel-subscription-button",
-      );
-      await user.click(cancelButton);
-
-      // Click confirm in modal
-      const confirmButton = screen.getByTestId("confirm-cancel-button");
-      await user.click(confirmButton);
-
-      // Should call the cancel subscription API
-      expect(cancelSubscriptionSpy).toHaveBeenCalled();
-    });
-
-    it("should close modal after successful cancellation", async () => {
-      const user = userEvent.setup();
-      cancelSubscriptionSpy.mockResolvedValue({
-        status: "success",
-        message: "Subscription cancelled successfully",
-      });
-      renderPaymentForm();
-
-      const cancelButton = await screen.findByTestId(
-        "cancel-subscription-button",
-      );
-      await user.click(cancelButton);
-
-      const confirmButton = screen.getByTestId("confirm-cancel-button");
-      await user.click(confirmButton);
-
-      // Wait for API call to complete and modal to close
-      await waitFor(() => {
-        expect(
-          screen.queryByTestId("cancel-subscription-modal"),
-        ).not.toBeInTheDocument();
-      });
-    });
-
-    it("should show next billing date for active subscription", async () => {
-      // Mock active subscription with end_at as next billing date
-      getSubscriptionAccessSpy.mockResolvedValue({
-        start_at: "2024-01-01T00:00:00Z",
-        end_at: "2025-01-01T00:00:00Z",
-        created_at: "2024-01-01T00:00:00Z",
-        cancelled_at: null,
-        stripe_subscription_id: "sub_123",
-      });
-
-      renderPaymentForm();
-
-      await waitFor(() => {
-        const nextBillingInfo = screen.getByTestId("next-billing-date");
-        expect(nextBillingInfo).toBeInTheDocument();
-        // Check that it contains some date-related content (translation key or actual date)
-        expect(nextBillingInfo).toHaveTextContent(
-          /2025|PAYMENT.*BILLING.*DATE/,
-        );
-      });
-    });
-
-    it("should not show next billing date when subscription is cancelled", async () => {
-      // Mock cancelled subscription
-      getSubscriptionAccessSpy.mockResolvedValue({
-        start_at: "2024-01-01T00:00:00Z",
-        end_at: "2025-01-01T00:00:00Z",
-        created_at: "2024-01-01T00:00:00Z",
-        cancelled_at: "2024-06-15T10:30:00Z",
-        stripe_subscription_id: "sub_123",
-      });
-
-      renderPaymentForm();
-
-      await waitFor(() => {
-        const nextBillingInfo = screen.queryByTestId("next-billing-date");
-        expect(nextBillingInfo).not.toBeInTheDocument();
-      });
     });
   });
 });

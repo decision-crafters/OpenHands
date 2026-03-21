@@ -1,3 +1,10 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
 import os
 from pathlib import Path
 
@@ -86,7 +93,7 @@ async def read_file(
         )
 
     try:
-        with open(whole_path, 'r', encoding='utf-8') as file:  # noqa: ASYNC101
+        with open(whole_path, 'r', encoding='utf-8') as file:
             lines = read_lines(file.readlines(), start, end)
     except FileNotFoundError:
         return ErrorObservation(f'File not found: {path}')
@@ -127,7 +134,7 @@ async def write_file(
             os.makedirs(os.path.dirname(whole_path))
         mode = 'w' if not os.path.exists(whole_path) else 'r+'
         try:
-            with open(whole_path, mode, encoding='utf-8') as file:  # noqa: ASYNC101
+            with open(whole_path, mode, encoding='utf-8') as file:
                 if mode != 'w':
                     all_lines = file.readlines()
                     new_file = insert_lines(insert, all_lines, start, end)

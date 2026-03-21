@@ -23,7 +23,7 @@ class GitService {
    */
   static async searchGitRepositories(
     query: string,
-    per_page = 5,
+    per_page = 100,
     selected_provider?: Provider,
   ): Promise<GitRepository[]> {
     const response = await openHands.get<GitRepository[]>(
@@ -131,9 +131,18 @@ class GitService {
     repository: string,
     page: number = 1,
     perPage: number = 30,
+    selectedProvider?: Provider,
   ): Promise<PaginatedBranchesResponse> {
     const { data } = await openHands.get<PaginatedBranchesResponse>(
-      `/api/user/repository/branches?repository=${encodeURIComponent(repository)}&page=${page}&per_page=${perPage}`,
+      `/api/user/repository/branches`,
+      {
+        params: {
+          repository,
+          page,
+          per_page: perPage,
+          selected_provider: selectedProvider,
+        },
+      },
     );
 
     return data;

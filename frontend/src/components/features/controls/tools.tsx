@@ -7,7 +7,8 @@ import { ToolsContextMenu } from "./tools-context-menu";
 import { useConversationNameContextMenu } from "#/hooks/use-conversation-name-context-menu";
 import { useActiveConversation } from "#/hooks/query/use-active-conversation";
 import { SystemMessageModal } from "../conversation-panel/system-message-modal";
-import { MicroagentsModal } from "../conversation-panel/microagents-modal";
+import { SkillsModal } from "../conversation-panel/skills-modal";
+import { HooksModal } from "../conversation-panel/hooks-modal";
 
 export function Tools() {
   const { t } = useTranslation();
@@ -17,12 +18,17 @@ export function Tools() {
 
   const {
     handleShowAgentTools,
-    handleShowMicroagents,
+    handleShowSkills,
+    handleShowHooks,
     systemModalVisible,
     setSystemModalVisible,
-    microagentsModalVisible,
-    setMicroagentsModalVisible,
+    skillsModalVisible,
+    setSkillsModalVisible,
+    hooksModalVisible,
+    setHooksModalVisible,
     systemMessage,
+    shouldShowAgentTools,
+    shouldShowHooks,
   } = useConversationNameContextMenu({
     conversationId,
     conversationStatus: conversation?.status,
@@ -50,8 +56,11 @@ export function Tools() {
       {contextMenuOpen && (
         <ToolsContextMenu
           onClose={() => setContextMenuOpen(false)}
-          onShowMicroagents={handleShowMicroagents}
+          onShowSkills={handleShowSkills}
+          onShowHooks={handleShowHooks}
           onShowAgentTools={handleShowAgentTools}
+          shouldShowAgentTools={shouldShowAgentTools}
+          shouldShowHooks={shouldShowHooks}
         />
       )}
 
@@ -59,12 +68,17 @@ export function Tools() {
       <SystemMessageModal
         isOpen={systemModalVisible}
         onClose={() => setSystemModalVisible(false)}
-        systemMessage={systemMessage ? systemMessage.args : null}
+        systemMessage={systemMessage || null}
       />
 
-      {/* Microagents Modal */}
-      {microagentsModalVisible && (
-        <MicroagentsModal onClose={() => setMicroagentsModalVisible(false)} />
+      {/* Skills Modal */}
+      {skillsModalVisible && (
+        <SkillsModal onClose={() => setSkillsModalVisible(false)} />
+      )}
+
+      {/* Hooks Modal */}
+      {hooksModalVisible && (
+        <HooksModal onClose={() => setHooksModalVisible(false)} />
       )}
     </div>
   );

@@ -16,6 +16,7 @@ from integrations.utils import (
     HOST_URL,
     OPENHANDS_RESOLVER_TEMPLATES_DIR,
     filter_potential_repos_by_user_msg,
+    get_session_expired_message,
 )
 from jinja2 import Environment, FileSystemLoader
 from server.auth.saas_user_auth import get_user_auth_from_keycloak_id
@@ -29,11 +30,16 @@ from openhands.core.logger import openhands_logger as logger
 from openhands.integrations.provider import ProviderHandler
 from openhands.integrations.service_types import Repository
 from openhands.server.shared import server_config
-from openhands.server.types import LLMAuthenticationError, MissingSettingsError
+from openhands.server.types import (
+    LLMAuthenticationError,
+    MissingSettingsError,
+    SessionExpiredError,
+)
 from openhands.server.user_auth.user_auth import UserAuth
+from openhands.utils.http_session import httpx_verify_option
 
 
-class LinearManager(Manager):
+class LinearManager(Manager[LinearViewInterface]):
     def __init__(self, token_manager: TokenManager):
         self.token_manager = token_manager
         self.integration_store = LinearIntegrationStore.get_instance()
@@ -337,7 +343,7 @@ class LinearManager(Manager):
             logger.error(f'[Linear] Error in is_job_requested: {str(e)}')
             return False
 
-    async def start_job(self, linear_view: LinearViewInterface):
+    async def start_job(self, linear_view: LinearViewInterface) -> None:
         """Start a Linear job/conversation."""
         # Import here to prevent circular import
         from server.conversation_callback_processor.linear_callback_processor import (
@@ -386,6 +392,10 @@ class LinearManager(Manager):
             logger.warning(f'[Linear] LLM authentication error: {str(e)}')
             msg_info = f'Please set a valid LLM API key in [OpenHands Cloud]({HOST_URL}) before starting a job.'
 
+        except SessionExpiredError as e:
+            logger.warning(f'[Linear] Session expired: {str(e)}')
+            msg_info = get_session_expired_message()
+
         except Exception as e:
             logger.error(
                 f'[Linear] Unexpected error starting job: {str(e)}', exc_info=True
@@ -398,7 +408,7 @@ class LinearManager(Manager):
                 linear_view.linear_workspace.svc_acc_api_key
             )
             await self.send_message(
-                self.create_outgoing_message(msg=msg_info),
+                msg_info,
                 linear_view.job_context.issue_id,
                 api_key,
             )
@@ -408,7 +418,7 @@ class LinearManager(Manager):
     async def _query_api(self, query: str, variables: Dict, api_key: str) -> Dict:
         """Query Linear GraphQL API."""
         headers = {'Authorization': api_key}
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=httpx_verify_option()) as client:
             response = await client.post(
                 self.api_url,
                 headers=headers,
@@ -463,8 +473,14 @@ class LinearManager(Manager):
 
         return title, description
 
-    async def send_message(self, message: Message, issue_id: str, api_key: str):
-        """Send message/comment to Linear issue."""
+    async def send_message(self, message: str, issue_id: str, api_key: str):
+        """Send message/comment to Linear issue.
+
+        Args:
+            message: The message content to send (plain text string)
+            issue_id: The Linear issue ID to comment on
+            api_key: The Linear API key for authentication
+        """
         query = """
             mutation CommentCreate($input: CommentCreateInput!) {
               commentCreate(input: $input) {
@@ -475,7 +491,7 @@ class LinearManager(Manager):
               }
             }
         """
-        variables = {'input': {'issueId': issue_id, 'body': message.message}}
+        variables = {'input': {'issueId': issue_id, 'body': message}}
         return await self._query_api(query, variables, api_key)
 
     async def _send_error_comment(
@@ -488,9 +504,7 @@ class LinearManager(Manager):
 
         try:
             api_key = self.token_manager.decrypt_text(workspace.svc_acc_api_key)
-            await self.send_message(
-                self.create_outgoing_message(msg=error_msg), issue_id, api_key
-            )
+            await self.send_message(error_msg, issue_id, api_key)
         except Exception as e:
             logger.error(f'[Linear] Failed to send error comment: {str(e)}')
 
@@ -507,7 +521,7 @@ class LinearManager(Manager):
             )
 
             await self.send_message(
-                self.create_outgoing_message(msg=comment_msg),
+                comment_msg,
                 linear_view.job_context.issue_id,
                 api_key,
             )

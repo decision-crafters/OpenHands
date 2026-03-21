@@ -1,3 +1,13 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
+# This module belongs to the old V0 web server. The V1 application server lives under openhands/app_server/.
+import os
+
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
@@ -11,21 +21,21 @@ from openhands.server.routes.secrets import invalidate_legacy_secrets_store
 from openhands.server.settings import (
     GETSettingsModel,
 )
-from openhands.server.settings_validation import (
-    check_llm_settings_changes,
-    validate_llm_settings_access,
-)
 from openhands.server.shared import config
 from openhands.server.user_auth import (
     get_provider_tokens,
     get_secrets_store,
-    get_user_id,
     get_user_settings,
     get_user_settings_store,
 )
 from openhands.storage.data_models.settings import Settings
 from openhands.storage.secrets.secrets_store import SecretsStore
 from openhands.storage.settings.settings_store import SettingsStore
+from openhands.utils.llm import get_provider_api_base, is_openhands_model
+
+LITE_LLM_API_URL = os.environ.get(
+    'LITE_LLM_API_URL', 'https://llm-proxy.app.all-hands.dev'
+)
 
 app = APIRouter(prefix='/api', dependencies=get_dependencies())
 
@@ -75,6 +85,17 @@ async def load_settings(
             and bool(settings.search_api_key),
             provider_tokens_set=provider_tokens_set,
         )
+
+        # If the base url matches the default for the provider, we don't send it
+        # So that the frontend can display basic mode
+        if is_openhands_model(settings.llm_model):
+            if settings.llm_base_url == LITE_LLM_API_URL:
+                settings_with_token_data.llm_base_url = None
+        elif settings.llm_model and settings.llm_base_url == get_provider_api_base(
+            settings.llm_model
+        ):
+            settings_with_token_data.llm_base_url = None
+
         settings_with_token_data.llm_api_key = None
         settings_with_token_data.search_api_key = None
         settings_with_token_data.sandbox_api_key = None
@@ -92,29 +113,9 @@ async def load_settings(
         )
 
 
-@app.post(
-    '/reset-settings',
-    responses={
-        410: {
-            'description': 'Reset settings functionality has been removed',
-            'model': dict,
-        }
-    },
-)
-async def reset_settings() -> JSONResponse:
-    """Resets user settings. (Deprecated)"""
-    logger.warning('Deprecated endpoint /api/reset-settings called by user')
-    return JSONResponse(
-        status_code=status.HTTP_410_GONE,
-        content={'error': 'Reset settings functionality has been removed.'},
-    )
-
-
 async def store_llm_settings(
-    settings: Settings, settings_store: SettingsStore
+    settings: Settings, existing_settings: Settings
 ) -> Settings:
-    existing_settings = await settings_store.load()
-
     # Convert to Settings model and merge with existing settings
     if existing_settings:
         # Keep existing LLM settings if not provided
@@ -123,9 +124,31 @@ async def store_llm_settings(
         if settings.llm_model is None:
             settings.llm_model = existing_settings.llm_model
         if settings.llm_base_url is None:
-            settings.llm_base_url = existing_settings.llm_base_url
-        # Keep existing search API key if not provided
-        if settings.search_api_key is None:
+            # Not provided at all (e.g. MCP config save) - preserve existing or auto-detect
+            if existing_settings.llm_base_url:
+                settings.llm_base_url = existing_settings.llm_base_url
+            elif is_openhands_model(settings.llm_model):
+                # OpenHands models use the LiteLLM proxy
+                settings.llm_base_url = LITE_LLM_API_URL
+            elif settings.llm_model:
+                # For non-openhands models, try to get URL from litellm
+                try:
+                    api_base = get_provider_api_base(settings.llm_model)
+                    if api_base:
+                        settings.llm_base_url = api_base
+                    else:
+                        logger.debug(
+                            f'No api_base found in litellm for model: {settings.llm_model}'
+                        )
+                except Exception as e:
+                    logger.error(
+                        f'Failed to get api_base from litellm for model {settings.llm_model}: {e}'
+                    )
+        elif settings.llm_base_url == '':
+            # Explicitly cleared by the user (basic view save or advanced view clear)
+            settings.llm_base_url = None
+        # Keep search API key if missing or empty
+        if not settings.search_api_key:
             settings.search_api_key = existing_settings.search_api_key
 
     return settings
@@ -140,37 +163,20 @@ async def store_llm_settings(
     response_model=None,
     responses={
         200: {'description': 'Settings stored successfully', 'model': dict},
-        403: {'description': 'Subscription required for pro models', 'model': dict},
         500: {'description': 'Error storing settings', 'model': dict},
     },
 )
 async def store_settings(
     settings: Settings,
     settings_store: SettingsStore = Depends(get_user_settings_store),
-    user_id: str = Depends(get_user_id),
 ) -> JSONResponse:
+    # Check provider tokens are valid
     try:
         existing_settings = await settings_store.load()
 
-        # Check if any LLM-related settings are being changed
-        llm_settings_being_changed = check_llm_settings_changes(
-            settings, existing_settings
-        )
-
-        if llm_settings_being_changed:
-            has_access = await validate_llm_settings_access(user_id)
-            if not has_access:
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={
-                        'error': 'Modifying LLM settings requires an active OpenHands Pro subscription. Please upgrade your account to access LLM configuration.',
-                        'detail': 'Subscription required for LLM settings modifications',
-                    },
-                )
-
         # Convert to Settings model and merge with existing settings
         if existing_settings:
-            settings = await store_llm_settings(settings, settings_store)
+            settings = await store_llm_settings(settings, existing_settings)
 
             # Keep existing analytics consent if not provided
             if settings.user_consents_to_analytics is None:

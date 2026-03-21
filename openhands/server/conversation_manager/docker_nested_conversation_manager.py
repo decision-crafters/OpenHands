@@ -1,3 +1,11 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
+# This module belongs to the old V0 web server. The V1 application server lives under openhands/app_server/.
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +28,6 @@ from openhands.core.logger import openhands_logger as logger
 from openhands.events.action import MessageAction
 from openhands.events.nested_event_store import NestedEventStore
 from openhands.events.stream import EventStream
-from openhands.experiments.experiment_manager import ExperimentManagerImpl
 from openhands.integrations.provider import PROVIDER_TOKEN_TYPE, ProviderHandler
 from openhands.runtime import get_runtime_cls
 from openhands.runtime.impl.docker.docker_runtime import DockerRuntime
@@ -42,6 +49,7 @@ from openhands.storage.data_models.settings import Settings
 from openhands.storage.files import FileStore
 from openhands.storage.locations import get_conversation_dir
 from openhands.utils.async_utils import call_sync_from_async
+from openhands.utils.http_session import httpx_verify_option
 from openhands.utils.import_utils import get_impl
 from openhands.utils.utils import create_registry_and_conversation_stats
 
@@ -62,6 +70,7 @@ class DockerNestedConversationManager(ConversationManager):
     async def __aenter__(self):
         runtime_cls = get_runtime_cls(self.config.runtime)
         runtime_cls.setup(self.config)
+        return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         runtime_cls = get_runtime_cls(self.config.runtime)
@@ -199,9 +208,10 @@ class DockerNestedConversationManager(ConversationManager):
             await call_sync_from_async(runtime.wait_until_alive)
             await call_sync_from_async(runtime.setup_initial_env)
             async with httpx.AsyncClient(
+                verify=httpx_verify_option(),
                 headers={
                     'X-Session-API-Key': self._get_session_api_key_for_conversation(sid)
-                }
+                },
             ) as client:
                 # setup the settings...
                 settings_json = settings.model_dump(context={'expose_secrets': True})
@@ -295,9 +305,10 @@ class DockerNestedConversationManager(ConversationManager):
 
     async def send_event_to_conversation(self, sid, data):
         async with httpx.AsyncClient(
+            verify=httpx_verify_option(),
             headers={
                 'X-Session-API-Key': self._get_session_api_key_for_conversation(sid)
-            }
+            },
         ) as client:
             nested_url = self._get_nested_url(sid)
             response = await client.post(
@@ -318,9 +329,10 @@ class DockerNestedConversationManager(ConversationManager):
         try:
             nested_url = self.get_nested_url_for_container(container)
             async with httpx.AsyncClient(
+                verify=httpx_verify_option(),
                 headers={
                     'X-Session-API-Key': self._get_session_api_key_for_conversation(sid)
-                }
+                },
             ) as client:
                 # Stop conversation
                 response = await client.post(
@@ -356,11 +368,12 @@ class DockerNestedConversationManager(ConversationManager):
         """
         try:
             async with httpx.AsyncClient(
+                verify=httpx_verify_option(),
                 headers={
                     'X-Session-API-Key': self._get_session_api_key_for_conversation(
                         conversation_id
                     )
-                }
+                },
             ) as client:
                 # Query the nested runtime for conversation info
                 response = await client.get(nested_url)
@@ -537,12 +550,8 @@ class DockerNestedConversationManager(ConversationManager):
         # This session is created here only because it is the easiest way to get a runtime, which
         # is the easiest way to create the needed docker container
 
-        config: OpenHandsConfig = ExperimentManagerImpl.run_config_variant_test(
-            user_id, sid, self.config
-        )
-
         llm_registry, conversation_stats, config = (
-            create_registry_and_conversation_stats(config, sid, user_id, settings)
+            create_registry_and_conversation_stats(self.config, sid, user_id, settings)
         )
 
         session = Session(
@@ -629,6 +638,68 @@ class DockerNestedConversationManager(ConversationManager):
             return False
         except docker.errors.NotFound:
             return False
+
+    async def list_files(self, sid: str, path: str | None = None) -> list[str]:
+        """List files in the workspace for a conversation.
+
+        Delegates to the nested container's list-files endpoint.
+
+        Args:
+            sid: The session/conversation ID.
+            path: Optional path to list files from. If None, lists from workspace root.
+
+        Returns:
+            A list of file paths.
+
+        Raises:
+            ValueError: If the conversation is not running.
+            httpx.HTTPError: If there's an error communicating with the nested runtime.
+        """
+        if not await self.is_agent_loop_running(sid):
+            raise ValueError(f'Conversation {sid} is not running')
+
+        nested_url = self._get_nested_url(sid)
+        session_api_key = self._get_session_api_key_for_conversation(sid)
+
+        return await self._fetch_list_files_from_nested(
+            sid, nested_url, session_api_key, path
+        )
+
+    async def select_file(self, sid: str, file: str) -> tuple[str | None, str | None]:
+        """Read a file from the workspace via nested container.
+
+        Raises:
+            ValueError: If the conversation is not running.
+            httpx.HTTPError: If there's an error communicating with the nested runtime.
+        """
+        if not await self.is_agent_loop_running(sid):
+            raise ValueError(f'Conversation {sid} is not running')
+
+        nested_url = self._get_nested_url(sid)
+        session_api_key = self._get_session_api_key_for_conversation(sid)
+
+        return await self._fetch_select_file_from_nested(
+            sid, nested_url, session_api_key, file
+        )
+
+    async def upload_files(
+        self, sid: str, files: list[tuple[str, bytes]]
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        """Upload files to the workspace via nested container.
+
+        Raises:
+            ValueError: If the conversation is not running.
+            httpx.HTTPError: If there's an error communicating with the nested runtime.
+        """
+        if not await self.is_agent_loop_running(sid):
+            raise ValueError(f'Conversation {sid} is not running')
+
+        nested_url = self._get_nested_url(sid)
+        session_api_key = self._get_session_api_key_for_conversation(sid)
+
+        return await self._fetch_upload_files_to_nested(
+            sid, nested_url, session_api_key, files
+        )
 
 
 def _last_updated_at_key(conversation: ConversationMetadata) -> float:

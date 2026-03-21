@@ -1,4 +1,3 @@
-from openhands.events.event import RecallType
 from openhands.events.observation.agent import (
     AgentCondensationObservation,
     AgentStateChangedObservation,
@@ -22,11 +21,13 @@ from openhands.events.observation.files import (
     FileReadObservation,
     FileWriteObservation,
 )
+from openhands.events.observation.loop_recovery import LoopDetectionObservation
 from openhands.events.observation.mcp import MCPObservation
 from openhands.events.observation.observation import Observation
 from openhands.events.observation.reject import UserRejectObservation
 from openhands.events.observation.success import SuccessObservation
 from openhands.events.observation.task_tracking import TaskTrackingObservation
+from openhands.events.recall_type import RecallType
 
 __all__ = [
     'Observation',
@@ -47,6 +48,7 @@ __all__ = [
     'AgentCondensationObservation',
     'RecallObservation',
     'RecallType',
+    'LoopDetectionObservation',
     'MCPObservation',
     'FileDownloadObservation',
     'TaskTrackingObservation',

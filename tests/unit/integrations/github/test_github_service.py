@@ -277,7 +277,7 @@ async def test_github_search_repositories_with_organizations():
         patch.object(service, 'get_user', return_value=mock_user),
         patch.object(
             service,
-            'get_user_organizations',
+            'get_organizations_from_installations',
             return_value=['All-Hands-AI', 'example-org'],
         ),
         patch.object(
@@ -285,7 +285,12 @@ async def test_github_search_repositories_with_organizations():
         ) as mock_request,
     ):
         repositories = await service.search_repositories(
-            query='openhands', per_page=10, sort='stars', order='desc', public=False
+            query='openhands',
+            per_page=10,
+            sort='stars',
+            order='desc',
+            public=False,
+            app_mode=AppMode.SAAS,
         )
 
         # Verify that separate requests were made for user and each organization
@@ -297,7 +302,7 @@ async def test_github_search_repositories_with_organizations():
         # First call should be for user repositories
         user_call = calls[0]
         user_params = user_call[0][1]  # Second argument is params
-        assert user_params['q'] == 'openhands user:testuser'
+        assert user_params['q'] == 'in:name openhands user:testuser'
 
         # Second call should be for first organization
         org1_call = calls[1]
@@ -398,6 +403,153 @@ async def test_github_service_graphql_url_enterprise_server():
         # After the fix, GraphQL URL should be correctly constructed for GitHub Enterprise Server
         # The URL should be /api/graphql, not /api/v3/graphql
         assert actual_url == 'https://github.enterprise.com/api/graphql'
+
+
+@pytest.mark.asyncio
+async def test_resolve_primary_email_selects_primary_verified():
+    """_resolve_primary_email returns the email marked primary and verified."""
+    from openhands.integrations.github.service.base import GitHubMixinBase
+
+    emails = [
+        {'email': 'secondary@example.com', 'primary': False, 'verified': True},
+        {'email': 'primary@example.com', 'primary': True, 'verified': True},
+        {'email': 'unverified@example.com', 'primary': False, 'verified': False},
+    ]
+    result = GitHubMixinBase._resolve_primary_email(emails)
+    assert result == 'primary@example.com'
+
+
+@pytest.mark.asyncio
+async def test_resolve_primary_email_returns_none_when_no_primary():
+    """_resolve_primary_email returns None when no email is marked primary."""
+    from openhands.integrations.github.service.base import GitHubMixinBase
+
+    emails = [
+        {'email': 'a@example.com', 'primary': False, 'verified': True},
+        {'email': 'b@example.com', 'primary': False, 'verified': True},
+    ]
+    result = GitHubMixinBase._resolve_primary_email(emails)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_primary_email_returns_none_when_primary_not_verified():
+    """_resolve_primary_email returns None when primary email is not verified."""
+    from openhands.integrations.github.service.base import GitHubMixinBase
+
+    emails = [
+        {'email': 'primary@example.com', 'primary': True, 'verified': False},
+        {'email': 'other@example.com', 'primary': False, 'verified': True},
+    ]
+    result = GitHubMixinBase._resolve_primary_email(emails)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_primary_email_returns_none_for_empty_list():
+    """_resolve_primary_email returns None for an empty list."""
+    from openhands.integrations.github.service.base import GitHubMixinBase
+
+    result = GitHubMixinBase._resolve_primary_email([])
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_user_emails():
+    """get_user_emails calls /user/emails and returns the response."""
+    service = GitHubService(user_id=None, token=SecretStr('test-token'))
+
+    mock_emails = [
+        {'email': 'primary@example.com', 'primary': True, 'verified': True},
+        {'email': 'secondary@example.com', 'primary': False, 'verified': True},
+    ]
+
+    with patch.object(service, '_make_request', return_value=(mock_emails, {})):
+        emails = await service.get_user_emails()
+
+        assert emails == mock_emails
+
+
+@pytest.mark.asyncio
+async def test_get_user_uses_email_from_user_endpoint():
+    """get_user does NOT call /user/emails when /user returns an email."""
+    service = GitHubService(user_id=None, token=SecretStr('test-token'))
+
+    mock_user_response = {
+        'id': 123,
+        'login': 'testuser',
+        'avatar_url': 'https://example.com/avatar.jpg',
+        'company': 'TestCo',
+        'name': 'Test User',
+        'email': 'user@example.com',
+    }
+
+    with patch.object(
+        service, '_make_request', return_value=(mock_user_response, {})
+    ) as mock_request:
+        user = await service.get_user()
+
+        assert user.email == 'user@example.com'
+        # Only one call to _make_request (/user), no /user/emails call
+        mock_request.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_user_falls_back_to_user_emails():
+    """get_user calls /user/emails when /user returns null email."""
+    service = GitHubService(user_id=None, token=SecretStr('test-token'))
+
+    mock_user_response = {
+        'id': 123,
+        'login': 'testuser',
+        'avatar_url': 'https://example.com/avatar.jpg',
+        'company': 'TestCo',
+        'name': 'Test User',
+        'email': None,
+    }
+
+    mock_emails = [
+        {'email': 'secondary@example.com', 'primary': False, 'verified': True},
+        {'email': 'primary@example.com', 'primary': True, 'verified': True},
+    ]
+
+    with (
+        patch.object(service, '_make_request', return_value=(mock_user_response, {})),
+        patch.object(service, 'get_user_emails', return_value=mock_emails),
+    ):
+        user = await service.get_user()
+
+        assert user.email == 'primary@example.com'
+
+
+@pytest.mark.asyncio
+async def test_get_user_handles_user_emails_api_failure():
+    """get_user handles /user/emails failure gracefully — email stays None."""
+    service = GitHubService(user_id=None, token=SecretStr('test-token'))
+
+    mock_user_response = {
+        'id': 123,
+        'login': 'testuser',
+        'avatar_url': 'https://example.com/avatar.jpg',
+        'company': None,
+        'name': 'Test User',
+        'email': None,
+    }
+
+    with (
+        patch.object(service, '_make_request', return_value=(mock_user_response, {})),
+        patch.object(
+            service,
+            'get_user_emails',
+            side_effect=Exception('API Error'),
+        ),
+    ):
+        user = await service.get_user()
+
+        # Email should remain None — no crash
+        assert user.email is None
+        assert user.login == 'testuser'
+        assert user.name == 'Test User'
 
 
 @pytest.mark.asyncio

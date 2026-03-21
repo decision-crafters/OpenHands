@@ -1,3 +1,10 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
 import os
 import subprocess
 import sys
@@ -12,7 +19,7 @@ def init_user_and_working_directory(
     It performs the following steps effectively:
     * Creates the Working Directory:
         - Uses mkdir -p to create the directory.
-        - Sets ownership to username:root.
+        - Sets ownership to username:group (respects SANDBOX_GROUP_ID if set).
         - Adjusts permissions to be readable and writable by group and others.
     * User Verification and Creation:
         - Checks if the user exists using id -u.
@@ -113,7 +120,9 @@ def init_user_and_working_directory(
     output = subprocess.run(command, shell=True, capture_output=True)
     out_str = output.stdout.decode()
 
-    command = f'chown -R {username}:root {initial_cwd}'
+    # Get group ID from environment variable, default to 'root' for backward compatibility
+    group_id = os.getenv('SANDBOX_GROUP_ID', 'root')
+    command = f'chown -R {username}:{group_id} {initial_cwd}'
     output = subprocess.run(command, shell=True, capture_output=True)
     out_str += output.stdout.decode()
 

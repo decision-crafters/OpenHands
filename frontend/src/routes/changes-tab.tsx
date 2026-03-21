@@ -1,12 +1,13 @@
 import { useTranslation } from "react-i18next";
 import React from "react";
 import { FileDiffViewer } from "#/components/features/diff-viewer/file-diff-viewer";
+import { EmptyChangesMessage } from "#/components/features/diff-viewer/empty-changes-message";
 import { retrieveAxiosErrorMessage } from "#/utils/retrieve-axios-error-message";
-import { useGetGitChanges } from "#/hooks/query/use-get-git-changes";
+import { useUnifiedGetGitChanges } from "#/hooks/query/use-unified-get-git-changes";
 import { I18nKey } from "#/i18n/declaration";
 import { RUNTIME_INACTIVE_STATES } from "#/types/agent-state";
 import { RandomTip } from "#/components/features/tips/random-tip";
-import { useAgentStore } from "#/stores/agent-store";
+import { useAgentState } from "#/hooks/use-agent-state";
 
 // Error message patterns
 const GIT_REPO_ERROR_PATTERN = /not a git repository/i;
@@ -27,13 +28,13 @@ function GitChanges() {
     isError,
     error,
     isLoading: loadingGitChanges,
-  } = useGetGitChanges();
+  } = useUnifiedGetGitChanges();
 
   const [statusMessage, setStatusMessage] = React.useState<string[] | null>(
     null,
   );
 
-  const { curAgentState } = useAgentStore();
+  const { curAgentState } = useAgentState();
   const runtimeIsActive = !RUNTIME_INACTIVE_STATES.includes(curAgentState);
 
   const isNotGitRepoError =
@@ -77,6 +78,9 @@ function GitChanges() {
                 ))}
               </StatusMessage>
             )}
+            {!statusMessage && isSuccess && gitChanges.length === 0 && (
+              <EmptyChangesMessage />
+            )}
           </div>
 
           <div className="absolute inset-x-0 bottom-0">
@@ -88,13 +92,15 @@ function GitChanges() {
           </div>
         </div>
       ) : (
-        gitChanges.map((change) => (
-          <FileDiffViewer
-            key={change.path}
-            path={change.path}
-            type={change.status}
-          />
-        ))
+        gitChanges
+          .slice(0, 100)
+          .map((change) => (
+            <FileDiffViewer
+              key={change.path}
+              path={change.path}
+              type={change.status}
+            />
+          ))
       )}
     </main>
   );

@@ -9,6 +9,7 @@ import requests  # type: ignore
 from fastapi import HTTPException
 from server.auth.constants import (
     BITBUCKET_APP_CLIENT_ID,
+    BITBUCKET_DATA_CENTER_CLIENT_ID,
     ENABLE_ENTERPRISE_SSO,
     ENABLE_JIRA,
     ENABLE_JIRA_DC,
@@ -17,11 +18,23 @@ from server.auth.constants import (
     GITHUB_APP_PRIVATE_KEY,
     GITHUB_APP_WEBHOOK_SECRET,
     GITLAB_APP_CLIENT_ID,
+    RECAPTCHA_SITE_KEY,
 )
 
+from openhands.core.config.utils import load_openhands_config
 from openhands.integrations.service_types import ProviderType
 from openhands.server.config.server_config import ServerConfig
 from openhands.server.types import AppMode
+
+# Create a function to get config to avoid circular imports
+_config = None
+
+
+def get_config():
+    global _config
+    if _config is None:
+        _config = load_openhands_config()
+    return _config
 
 
 def sign_token(payload: dict[str, object], jwt_secret: str, algorithm='HS256') -> str:
@@ -152,6 +165,9 @@ class SaaSServerConfig(ServerConfig):
         if ENABLE_ENTERPRISE_SSO:
             providers_configured.append(ProviderType.ENTERPRISE_SSO)
 
+        if BITBUCKET_DATA_CENTER_CLIENT_ID:
+            providers_configured.append(ProviderType.BITBUCKET_DATA_CENTER)
+
         config: dict[str, typing.Any] = {
             'APP_MODE': self.app_mode,
             'APP_SLUG': self.app_slug,
@@ -175,5 +191,8 @@ class SaaSServerConfig(ServerConfig):
 
         if self.auth_url:
             config['AUTH_URL'] = self.auth_url
+
+        if RECAPTCHA_SITE_KEY:
+            config['RECAPTCHA_SITE_KEY'] = RECAPTCHA_SITE_KEY
 
         return config

@@ -1,7 +1,9 @@
-import { RefObject, useEffect, useState, useCallback, useRef } from "react";
+import { RefObject, useState, useCallback, useRef } from "react";
 
 export function useScrollToBottom(scrollRef: RefObject<HTMLDivElement | null>) {
-  // Track whether we should auto-scroll to the bottom when content changes
+  // Track whether the user is currently near the bottom of the scroll area.
+  // Used by consumers (e.g., likert-scale) to decide whether to scroll when
+  // new UI elements appear. NOT used for automatic content-following.
   const [autoscroll, setAutoscroll] = useState(true);
 
   // Track whether the user is currently at the bottom of the scroll area
@@ -46,39 +48,18 @@ export function useScrollToBottom(scrollRef: RefObject<HTMLDivElement | null>) {
     [isAtBottom],
   );
 
-  // Scroll to bottom function with animation
+  // Scroll to bottom on manual click only
   const scrollDomToBottom = useCallback(() => {
     const dom = scrollRef.current;
     if (dom) {
       requestAnimationFrame(() => {
-        // Set autoscroll to true when manually scrolling to bottom
         setAutoscroll(true);
         setHitBottom(true);
 
-        // Use smooth scrolling but with a fast duration
-        dom.scrollTo({
-          top: dom.scrollHeight,
-          behavior: "smooth",
-        });
+        dom.scrollTop = dom.scrollHeight;
       });
     }
   }, [scrollRef]);
-
-  // Auto-scroll effect that runs when content changes
-  useEffect(() => {
-    // Only auto-scroll if autoscroll is enabled
-    if (autoscroll) {
-      const dom = scrollRef.current;
-      if (dom) {
-        requestAnimationFrame(() => {
-          dom.scrollTo({
-            top: dom.scrollHeight,
-            behavior: "smooth",
-          });
-        });
-      }
-    }
-  });
 
   return {
     scrollRef,

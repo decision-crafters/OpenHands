@@ -12,10 +12,15 @@ import { BrandButton } from "#/components/features/settings/brand-button";
 import { ConfirmationModal } from "#/components/shared/modals/confirmation-modal";
 import { GetSecretsResponse } from "#/api/secrets-service.types";
 import { I18nKey } from "#/i18n/declaration";
+import { createPermissionGuard } from "#/utils/org/permission-guard";
+import { useSelectedOrganizationId } from "#/context/use-selected-organization";
+
+export const clientLoader = createPermissionGuard("manage_secrets");
 
 function SecretsSettingsScreen() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const { organizationId } = useSelectedOrganizationId();
 
   const { data: secrets, isLoading: isLoadingSecrets } = useGetSecrets();
   const { mutate: deleteSecret } = useDeleteSecret();
@@ -31,7 +36,7 @@ function SecretsSettingsScreen() {
 
   const deleteSecretOptimistically = (secret: string) => {
     queryClient.setQueryData<GetSecretsResponse["custom_secrets"]>(
-      ["secrets"],
+      ["secrets", organizationId],
       (oldSecrets) => {
         if (!oldSecrets) return [];
         return oldSecrets.filter((s) => s.name !== secret);
@@ -40,7 +45,7 @@ function SecretsSettingsScreen() {
   };
 
   const revertOptimisticUpdate = () => {
-    queryClient.invalidateQueries({ queryKey: ["secrets"] });
+    queryClient.invalidateQueries({ queryKey: ["secrets", organizationId] });
   };
 
   const handleDeleteSecret = (secret: string) => {
@@ -85,9 +90,9 @@ function SecretsSettingsScreen() {
 
       {view === "list" && (
         <div className="border border-tertiary rounded-md overflow-hidden">
-          <table className="w-full">
+          <table className="w-full min-w-full table-fixed">
             <thead className="bg-base-tertiary">
-              <tr className="flex w-full items-center">
+              <tr>
                 <th className="w-1/4 text-left p-3 text-sm font-medium">
                   {t(I18nKey.SETTINGS$NAME)}
                 </th>

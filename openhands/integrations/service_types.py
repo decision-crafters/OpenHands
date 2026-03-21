@@ -21,6 +21,9 @@ class ProviderType(Enum):
     GITHUB = 'github'
     GITLAB = 'gitlab'
     BITBUCKET = 'bitbucket'
+    BITBUCKET_DATA_CENTER = 'bitbucket_data_center'
+    FORGEJO = 'forgejo'
+    AZURE_DEVOPS = 'azure_devops'
     ENTERPRISE_SSO = 'enterprise_sso'
 
 
@@ -74,6 +77,16 @@ class SuggestedTask(BaseModel):
                 'tokenEnvVar': 'BITBUCKET_TOKEN',
                 'ciSystem': 'Bitbucket Pipelines',
                 'ciProvider': 'Bitbucket',
+                'requestVerb': 'pull request',
+            }
+        elif self.git_provider == ProviderType.BITBUCKET_DATA_CENTER:
+            return {
+                'requestType': 'Pull Request',
+                'requestTypeShort': 'PR',
+                'apiName': 'Bitbucket Data Center API',
+                'tokenEnvVar': 'BITBUCKET_DATA_CENTER_TOKEN',
+                'ciSystem': 'Bitbucket Pipelines',
+                'ciProvider': 'Bitbucket Data Center',
                 'requestVerb': 'pull request',
             }
 
@@ -174,6 +187,12 @@ class UnknownException(ValueError):
 
 class RateLimitError(ValueError):
     """Raised when the git provider's API rate limits are exceeded."""
+
+    pass
+
+
+class ProviderTimeoutError(ValueError):
+    """Raised when a request to a git provider times out."""
 
     pass
 
@@ -458,7 +477,13 @@ class GitService(Protocol):
         ...
 
     async def search_repositories(
-        self, query: str, per_page: int, sort: str, order: str, public: bool
+        self,
+        query: str,
+        per_page: int,
+        sort: str,
+        order: str,
+        public: bool,
+        app_mode: AppMode,
     ) -> list[Repository]:
         """Search for public repositories"""
         ...

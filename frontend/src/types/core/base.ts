@@ -21,7 +21,7 @@ export type OpenHandsEventType =
   | "task_tracking"
   | "user_rejected";
 
-export type OpenHandsSourceType = "agent" | "user" | "environment";
+export type OpenHandsSourceType = "agent" | "user" | "environment" | "hook";
 
 interface OpenHandsBaseEvent {
   id: number;
@@ -30,14 +30,16 @@ interface OpenHandsBaseEvent {
   timestamp: string; // ISO 8601
 }
 
-export interface OpenHandsActionEvent<T extends OpenHandsEventType>
-  extends OpenHandsBaseEvent {
+export interface OpenHandsActionEvent<
+  T extends OpenHandsEventType,
+> extends OpenHandsBaseEvent {
   action: T;
   args: Record<string, unknown>;
 }
 
-export interface OpenHandsObservationEvent<T extends OpenHandsEventType>
-  extends OpenHandsBaseEvent {
+export interface OpenHandsObservationEvent<
+  T extends OpenHandsEventType,
+> extends OpenHandsBaseEvent {
   cause: number;
   observation: T;
   content: string;

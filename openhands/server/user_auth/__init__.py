@@ -1,10 +1,11 @@
-from fastapi import Request
+from fastapi import Depends, Request
+from fastapi.security import APIKeyHeader
 from pydantic import SecretStr
 
 from openhands.integrations.provider import PROVIDER_TOKEN_TYPE
 from openhands.server.settings import Settings
 from openhands.server.user_auth.user_auth import AuthType, get_user_auth
-from openhands.storage.data_models.user_secrets import UserSecrets
+from openhands.storage.data_models.secrets import Secrets
 from openhands.storage.secrets.secrets_store import SecretsStore
 from openhands.storage.settings.settings_store import SettingsStore
 
@@ -21,7 +22,15 @@ async def get_access_token(request: Request) -> SecretStr | None:
     return access_token
 
 
-async def get_user_id(request: Request) -> str | None:
+async def get_user_id(
+    request: Request,
+    api_key_header: str | None = Depends(
+        APIKeyHeader(name='X-Access-Token', auto_error=False)
+    ),
+) -> str | None:
+    """Get the current user_id. Used for dependency injection - the
+    api key header is used here to signal the requirement in OpenAPI
+    docs"""
     user_auth = await get_user_auth(request)
     user_id = await user_auth.get_user_id()
     return user_id
@@ -39,9 +48,9 @@ async def get_secrets_store(request: Request) -> SecretsStore:
     return secrets_store
 
 
-async def get_user_secrets(request: Request) -> UserSecrets | None:
+async def get_secrets(request: Request) -> Secrets | None:
     user_auth = await get_user_auth(request)
-    user_secrets = await user_auth.get_user_secrets()
+    user_secrets = await user_auth.get_secrets()
     return user_secrets
 
 

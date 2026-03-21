@@ -76,6 +76,10 @@ export interface Conversation {
   url: string | null;
   session_api_key: string | null;
   pr_number?: number[] | null;
+  conversation_version?: "V0" | "V1";
+  sub_conversation_ids?: string[];
+  public?: boolean;
+  sandbox_id?: string | null;
 }
 
 export interface ResultSet<T> {
@@ -83,7 +87,12 @@ export interface ResultSet<T> {
   next_page_id: string | null;
 }
 
+/**
+ * @deprecated Use V1GitChangeStatus for new code. This type is maintained for backward compatibility with V0 API.
+ */
 export type GitChangeStatus = "M" | "A" | "D" | "R" | "U";
+
+export type V1GitChangeStatus = "MOVED" | "ADDED" | "DELETED" | "UPDATED";
 
 export interface GitChange {
   status: GitChangeStatus;
@@ -102,7 +111,7 @@ export interface InputMetadata {
 
 export interface Microagent {
   name: string;
-  type: "repo" | "knowledge";
+  type: "repo" | "knowledge" | "agentskills";
   content: string;
   triggers: string[];
 }

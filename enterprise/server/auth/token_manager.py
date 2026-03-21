@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -13,10 +14,18 @@ from keycloak.exceptions import (
     KeycloakAuthenticationError,
     KeycloakConnectionError,
     KeycloakError,
+    KeycloakPostError,
 )
+from pydantic import BaseModel
+from server.auth.auth_error import ExpiredError
 from server.auth.constants import (
     BITBUCKET_APP_CLIENT_ID,
     BITBUCKET_APP_CLIENT_SECRET,
+    BITBUCKET_DATA_CENTER_CLIENT_ID,
+    BITBUCKET_DATA_CENTER_CLIENT_SECRET,
+    BITBUCKET_DATA_CENTER_HOST,
+    BITBUCKET_DATA_CENTER_TOKEN_URL,
+    DUPLICATE_EMAIL_CHECK,
     GITHUB_APP_CLIENT_ID,
     GITHUB_APP_CLIENT_SECRET,
     GITLAB_APP_CLIENT_ID,
@@ -25,28 +34,53 @@ from server.auth.constants import (
     KEYCLOAK_SERVER_URL,
     KEYCLOAK_SERVER_URL_EXT,
 )
+from server.auth.email_validation import (
+    extract_base_email,
+    get_base_email_regex_pattern,
+    matches_base_email,
+)
 from server.auth.keycloak_manager import get_keycloak_admin, get_keycloak_openid
+from server.config import get_config
 from server.logger import logger
 from sqlalchemy import String as SQLString
-from sqlalchemy import type_coerce
+from sqlalchemy import select, type_coerce
 from storage.auth_token_store import AuthTokenStore
-from storage.database import session_maker
+from storage.database import a_session_maker
 from storage.github_app_installation import GithubAppInstallation
 from storage.offline_token_store import OfflineTokenStore
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt
 
-from openhands.core.config import load_openhands_config
 from openhands.integrations.service_types import ProviderType
+from openhands.server.types import SessionExpiredError
+from openhands.utils.http_session import httpx_verify_option
 
-# Create a function to get config to avoid circular imports
-_config = None
+
+class KeycloakUserInfo(BaseModel):
+    """Pydantic model for Keycloak UserInfo endpoint response.
+
+    Based on OIDC standard claims. 'sub' is always required per OIDC spec.
+    Additional fields from Keycloak are captured via model_config extra='allow'.
+    """
+
+    model_config = {'extra': 'allow'}
+
+    sub: str
+    name: str | None = None
+    given_name: str | None = None
+    family_name: str | None = None
+    preferred_username: str | None = None
+    email: str | None = None
+    email_verified: bool | None = None
+    picture: str | None = None
+    attributes: dict[str, list[str]] | None = None
+    identity_provider: str | None = None
+    company: str | None = None
+    roles: list[str] | None = None
 
 
-def get_config():
-    global _config
-    if _config is None:
-        _config = load_openhands_config()
-    return _config
+# HTTP timeout for external IDP calls (in seconds)
+# This prevents indefinite blocking if an IDP is slow or unresponsive
+IDP_HTTP_TIMEOUT = 15.0
 
 
 def _before_sleep_callback(retry_state: RetryCallState) -> None:
@@ -136,22 +170,22 @@ class TokenManager:
                 new_keycloak_tokens['refresh_token'],
             )
 
-    # UserInfo from Keycloak return a dictionary with the following format:
-    # {
-    # 'sub': '248289761001',
-    # 'name': 'Jane Doe',
-    # 'given_name': 'Jane',
-    # 'family_name': 'Doe',
-    # 'preferred_username': 'j.doe',
-    # 'email': 'janedoe@example.com',
-    # 'picture': 'http://example.com/janedoe/me.jpg'
-    # 'github_id': '354322532'
-    # }
-    async def get_user_info(self, access_token: str) -> dict:
-        if not access_token:
-            return {}
+    async def get_user_info(self, access_token: str) -> KeycloakUserInfo:
+        """Get user info from Keycloak userinfo endpoint.
+
+        Args:
+            access_token: A valid Keycloak access token
+
+        Returns:
+            KeycloakUserInfo with user claims. 'sub' is always present per OIDC spec.
+
+        Raises:
+            KeycloakAuthenticationError: If the token is invalid
+            ValidationError: If the response is missing the required 'sub' field
+        """
         user_info = await get_keycloak_openid(self.external).a_userinfo(access_token)
-        return user_info
+        # Pydantic validation will raise ValidationError if 'sub' is missing
+        return KeycloakUserInfo.model_validate(user_info)
 
     @retry(
         stop=stop_after_attempt(2),
@@ -201,7 +235,9 @@ class TokenManager:
         access_token: str,
         idp: ProviderType,
     ) -> dict[str, str | int]:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            verify=httpx_verify_option(), timeout=IDP_HTTP_TIMEOUT
+        ) as client:
             base_url = KEYCLOAK_SERVER_URL_EXT if self.external else KEYCLOAK_SERVER_URL
             url = f'{base_url}/realms/{KEYCLOAK_REALM_NAME}/broker/{idp.value}/token'
             headers = {
@@ -263,8 +299,8 @@ class TokenManager:
     ) -> str:
         # Get user info to determine user_id and idp
         user_info = await self.get_user_info(access_token=access_token)
-        user_id = user_info.get('sub')
-        username = user_info.get('preferred_username')
+        user_id = user_info.sub
+        username = user_info.preferred_username
         logger.info(f'Getting token for user {username} and IDP {idp}')
         token_store = await AuthTokenStore.get_instance(
             keycloak_user_id=user_id, idp=idp
@@ -303,11 +339,12 @@ class TokenManager:
         refresh_token_expires_at: int,
     ) -> dict[str, str | int] | None:
         current_time = int(time.time())
-        # expire access_token ten minutes before actual expiration
+        # expire access_token four hours before actual expiration
+        # This ensures tokens are refreshed on resume to have at least 4 hours validity
         access_expired = (
             False
             if access_token_expires_at == 0
-            else access_token_expires_at < current_time + 600
+            else access_token_expires_at < current_time + 14400
         )
         refresh_expired = (
             False
@@ -346,6 +383,8 @@ class TokenManager:
             return await self._refresh_gitlab_token(refresh_token)
         elif idp == ProviderType.BITBUCKET:
             return await self._refresh_bitbucket_token(refresh_token)
+        elif idp == ProviderType.BITBUCKET_DATA_CENTER:
+            return await self._refresh_bitbucket_data_center_token(refresh_token)
         else:
             raise ValueError(f'Unsupported IDP: {idp}')
 
@@ -359,7 +398,9 @@ class TokenManager:
             'refresh_token': refresh_token,
             'grant_type': 'refresh_token',
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            verify=httpx_verify_option(), timeout=IDP_HTTP_TIMEOUT
+        ) as client:
             response = await client.post(url, data=payload)
             response.raise_for_status()
             logger.info('Successfully refreshed GitHub token')
@@ -385,7 +426,9 @@ class TokenManager:
             'refresh_token': refresh_token,
             'grant_type': 'refresh_token',
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            verify=httpx_verify_option(), timeout=IDP_HTTP_TIMEOUT
+        ) as client:
             response = await client.post(url, data=payload)
             response.raise_for_status()
             logger.info('Successfully refreshed GitLab token')
@@ -413,10 +456,39 @@ class TokenManager:
             'refresh_token': refresh_token,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            verify=httpx_verify_option(), timeout=IDP_HTTP_TIMEOUT
+        ) as client:
             response = await client.post(url, data=data, headers=headers)
             response.raise_for_status()
             logger.info('Successfully refreshed Bitbucket token')
+
+            data = response.json()
+            return await self._parse_refresh_response(data)
+
+    async def _refresh_bitbucket_data_center_token(
+        self, refresh_token: str
+    ) -> dict[str, str | int]:
+        if not BITBUCKET_DATA_CENTER_HOST:
+            raise ValueError(
+                'BITBUCKET_DATA_CENTER_HOST is not configured. '
+                'Set the BITBUCKET_DATA_CENTER_HOST environment variable.'
+            )
+        url = BITBUCKET_DATA_CENTER_TOKEN_URL
+        logger.info(f'Refreshing Bitbucket Data Center token with URL: {url}')
+
+        payload = {
+            'client_id': BITBUCKET_DATA_CENTER_CLIENT_ID,
+            'client_secret': BITBUCKET_DATA_CENTER_CLIENT_SECRET,
+            'refresh_token': refresh_token,
+            'grant_type': 'refresh_token',
+        }
+        async with httpx.AsyncClient(
+            verify=httpx_verify_option(), timeout=IDP_HTTP_TIMEOUT
+        ) as client:
+            response = await client.post(url, data=payload)
+            response.raise_for_status()
+            logger.info('Successfully refreshed Bitbucket Data Center token')
 
             data = response.json()
             return await self._parse_refresh_response(data)
@@ -425,6 +497,8 @@ class TokenManager:
         access_token = data.get('access_token')
         refresh_token = data.get('refresh_token')
         if not access_token or not refresh_token:
+            if data.get('error') == 'bad_refresh_token':
+                raise ExpiredError()
             raise ValueError(
                 'Failed to refresh token: missing access_token or refresh_token in response.'
             )
@@ -466,6 +540,14 @@ class TokenManager:
             return await self.get_idp_token(tokens['access_token'], idp)
         except KeycloakConnectionError:
             logger.exception('KeycloakConnectionError when refreshing token')
+            raise
+        except KeycloakPostError as e:
+            error_message = str(e)
+            if 'invalid_grant' in error_message or 'session not found' in error_message:
+                logger.warning(f'User session expired or invalid: {error_message}')
+                raise SessionExpiredError(
+                    'Your session has expired. Please login again.'
+                ) from e
             raise
 
     @retry(
@@ -517,6 +599,187 @@ class TokenManager:
         logger.info(f'Got user ID {keycloak_user_id} from email: {email}')
         return keycloak_user_id
 
+    async def _query_users_by_wildcard_pattern(
+        self, local_part: str, domain: str
+    ) -> dict[str, dict]:
+        """Query Keycloak for users matching a wildcard email pattern.
+
+        Tries multiple query methods to find users with emails matching
+        the pattern {local_part}*@{domain}. This catches the base email
+        and all + modifier variants.
+
+        Args:
+            local_part: The local part of the email (before @)
+            domain: The domain part of the email (after @)
+
+        Returns:
+            Dictionary mapping user IDs to user objects
+        """
+        keycloak_admin = get_keycloak_admin(self.external)
+        all_users = {}
+
+        # Query for users with emails matching the base pattern using wildcard
+        # Pattern: {local_part}*@{domain} - catches base email and all + variants
+        # This may also catch unintended matches (e.g., joesmith@example.com), but
+        # they will be filtered out by the regex pattern check later
+        # Use 'search' parameter for Keycloak 26+ (better wildcard support)
+        wildcard_queries = [
+            {'search': f'{local_part}*@{domain}'},  # Try 'search' parameter first
+            {'q': f'email:{local_part}*@{domain}'},  # Fallback to 'q' parameter
+        ]
+
+        for query_params in wildcard_queries:
+            try:
+                users = await keycloak_admin.a_get_users(query_params)
+                for user in users:
+                    all_users[user.get('id')] = user
+                break  # Success, no need to try fallback
+            except Exception as e:
+                logger.debug(
+                    f'Wildcard query failed with {list(query_params.keys())[0]}: {e}'
+                )
+                continue  # Try next query method
+
+        return all_users
+
+    def _find_duplicate_in_users(
+        self, users: dict[str, dict], base_email: str, current_user_id: str
+    ) -> bool:
+        """Check if any user in the provided list matches the base email pattern.
+
+        Filters users to find duplicates that match the base email pattern,
+        excluding the current user.
+
+        Args:
+            users: Dictionary mapping user IDs to user objects
+            base_email: The base email to match against
+            current_user_id: The user ID to exclude from the check
+
+        Returns:
+            True if a duplicate is found, False otherwise
+        """
+        regex_pattern = get_base_email_regex_pattern(base_email)
+        if not regex_pattern:
+            logger.warning(
+                f'Could not generate regex pattern for base email: {base_email}'
+            )
+            # Fallback to simple matching
+            for user in users.values():
+                user_email = user.get('email', '').lower()
+                if (
+                    user_email
+                    and user.get('id') != current_user_id
+                    and matches_base_email(user_email, base_email)
+                ):
+                    logger.info(
+                        f'Found duplicate email: {user_email} matches base {base_email}'
+                    )
+                    return True
+        else:
+            for user in users.values():
+                user_email = user.get('email', '')
+                if (
+                    user_email
+                    and user.get('id') != current_user_id
+                    and regex_pattern.match(user_email)
+                ):
+                    logger.info(
+                        f'Found duplicate email: {user_email} matches base {base_email}'
+                    )
+                    return True
+
+        return False
+
+    @retry(
+        stop=stop_after_attempt(2),
+        retry=retry_if_exception_type(KeycloakConnectionError),
+        before_sleep=_before_sleep_callback,
+    )
+    async def check_duplicate_base_email(
+        self, email: str, current_user_id: str
+    ) -> bool:
+        """Check if a user with the same base email already exists.
+
+        This method checks for duplicate signups using email + modifier.
+        It checks if any user exists with the same base email, regardless of whether
+        the provided email has a + modifier or not.
+
+        Examples:
+            - If email is "joe+test@example.com", it checks for existing users with
+              base email "joe@example.com" (e.g., "joe@example.com", "joe+1@example.com")
+            - If email is "joe@example.com", it checks for existing users with
+              base email "joe@example.com" (e.g., "joe+1@example.com", "joe+test@example.com")
+
+        Args:
+            email: The email address to check (may or may not contain + modifier)
+            current_user_id: The user ID of the current user (to exclude from check)
+
+        Returns:
+            True if a duplicate is found (excluding current user), False otherwise
+        """
+        if not email:
+            return False
+
+        # We have the option to skip the duplicate email check in test environments
+        if not DUPLICATE_EMAIL_CHECK:
+            return False
+
+        base_email = extract_base_email(email)
+        if not base_email:
+            logger.warning(f'Could not extract base email from: {email}')
+            return False
+
+        try:
+            local_part, domain = base_email.rsplit('@', 1)
+            users = await self._query_users_by_wildcard_pattern(local_part, domain)
+            return self._find_duplicate_in_users(users, base_email, current_user_id)
+
+        except KeycloakConnectionError:
+            logger.exception('KeycloakConnectionError when checking duplicate email')
+            raise
+        except Exception as e:
+            logger.exception(f'Unexpected error checking duplicate email: {e}')
+            # On any error, allow signup to proceed (fail open)
+            return False
+
+    @retry(
+        stop=stop_after_attempt(2),
+        retry=retry_if_exception_type(KeycloakConnectionError),
+        before_sleep=_before_sleep_callback,
+    )
+    async def delete_keycloak_user(self, user_id: str) -> bool:
+        """Delete a user from Keycloak.
+
+        This method is used to clean up user accounts that were created
+        but should not exist (e.g., duplicate email signups).
+
+        Args:
+            user_id: The Keycloak user ID to delete
+
+        Returns:
+            True if deletion was successful, False otherwise
+        """
+        try:
+            keycloak_admin = get_keycloak_admin(self.external)
+            # Use the sync method (python-keycloak doesn't have async delete_user)
+            # Run it in a thread executor to avoid blocking the event loop
+            await asyncio.to_thread(keycloak_admin.delete_user, user_id)
+            logger.info(f'Successfully deleted Keycloak user {user_id}')
+            return True
+        except KeycloakConnectionError:
+            logger.exception(f'KeycloakConnectionError when deleting user {user_id}')
+            raise
+        except KeycloakError as e:
+            # User might not exist or already deleted
+            logger.warning(
+                f'KeycloakError when deleting user {user_id}: {e}',
+                extra={'user_id': user_id, 'error': str(e)},
+            )
+            return False
+        except Exception as e:
+            logger.exception(f'Unexpected error deleting Keycloak user {user_id}: {e}')
+            return False
+
     async def get_user_info_from_user_id(self, user_id: str) -> dict | None:
         keycloak_admin = get_keycloak_admin(self.external)
         user = await keycloak_admin.a_get_user(user_id)
@@ -535,25 +798,67 @@ class TokenManager:
         github_id = github_ids[0]
         return github_id
 
-    def store_org_token(self, installation_id: int, installation_token: str):
+    async def disable_keycloak_user(
+        self, user_id: str, email: str | None = None
+    ) -> None:
+        """Disable a Keycloak user account.
+
+        Args:
+            user_id: The Keycloak user ID to disable
+            email: Optional email address for logging purposes
+
+        This method attempts to disable the user account but will not raise exceptions.
+        Errors are logged but do not prevent the operation from completing.
+        """
+        try:
+            keycloak_admin = get_keycloak_admin(self.external)
+            # Get current user to preserve other fields
+            user = await keycloak_admin.a_get_user(user_id)
+            if user:
+                # Update user with enabled=False to disable the account
+                await keycloak_admin.a_update_user(
+                    user_id=user_id,
+                    payload={
+                        'enabled': False,
+                        'username': user.get('username', ''),
+                        'email': user.get('email', ''),
+                        'emailVerified': user.get('emailVerified', False),
+                    },
+                )
+                email_str = f', email: {email}' if email else ''
+                logger.info(
+                    f'Disabled Keycloak account for user_id: {user_id}{email_str}'
+                )
+            else:
+                logger.warning(
+                    f'User not found in Keycloak when attempting to disable: {user_id}'
+                )
+        except Exception as e:
+            # Log error but don't raise - the caller should handle the blocking regardless
+            email_str = f', email: {email}' if email else ''
+            logger.error(
+                f'Failed to disable Keycloak account for user_id: {user_id}{email_str}: {str(e)}',
+                exc_info=True,
+            )
+
+    async def store_org_token(self, installation_id: int, installation_token: str):
         """Store a GitHub App installation token.
 
         Args:
             installation_id: GitHub installation ID (integer or string)
             installation_token: The token to store
         """
-        with session_maker() as session:
+        async with a_session_maker() as session:
             # Ensure installation_id is a string
             str_installation_id = str(installation_id)
             # Use type_coerce to ensure SQLAlchemy treats the parameter as a string
-            installation = (
-                session.query(GithubAppInstallation)
-                .filter(
+            result = await session.execute(
+                select(GithubAppInstallation).filter(
                     GithubAppInstallation.installation_id
                     == type_coerce(str_installation_id, SQLString)
                 )
-                .first()
             )
+            installation = result.scalars().first()
             if installation:
                 installation.encrypted_token = self.encrypt_text(installation_token)
             else:
@@ -563,9 +868,9 @@ class TokenManager:
                         encrypted_token=self.encrypt_text(installation_token),
                     )
                 )
-            session.commit()
+            await session.commit()
 
-    def load_org_token(self, installation_id: int) -> str | None:
+    async def load_org_token(self, installation_id: int) -> str | None:
         """Load a GitHub App installation token.
 
         Args:
@@ -574,17 +879,16 @@ class TokenManager:
         Returns:
             The decrypted token if found, None otherwise
         """
-        with session_maker() as session:
+        async with a_session_maker() as session:
             # Ensure installation_id is a string and use type_coerce
             str_installation_id = str(installation_id)
-            installation = (
-                session.query(GithubAppInstallation)
-                .filter(
+            result = await session.execute(
+                select(GithubAppInstallation).filter(
                     GithubAppInstallation.installation_id
                     == type_coerce(str_installation_id, SQLString)
                 )
-                .first()
             )
+            installation = result.scalars().first()
             if not installation:
                 return None
             token = self.decrypt_text(installation.encrypted_token)

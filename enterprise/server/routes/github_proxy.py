@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import zlib
 from base64 import b64decode, b64encode
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -11,6 +12,7 @@ from fastapi.responses import RedirectResponse
 from server.logger import logger
 
 from openhands.server.shared import config
+from openhands.utils.http_session import httpx_verify_option
 
 GITHUB_PROXY_ENDPOINTS = bool(os.environ.get('GITHUB_PROXY_ENDPOINTS'))
 
@@ -50,7 +52,11 @@ def add_github_proxy_routes(app: FastAPI):
         state_payload = json.dumps(
             [query_params['state'][0], query_params['redirect_uri'][0]]
         )
-        state = b64encode(_fernet().encrypt(state_payload.encode())).decode()
+        # Compress before encrypting to reduce URL length
+        # This is critical for feature deployments where reCAPTCHA tokens in state
+        # can cause "URL too long" errors from GitHub
+        compressed_payload = zlib.compress(state_payload.encode())
+        state = b64encode(_fernet().encrypt(compressed_payload)).decode()
         query_params['state'] = [state]
         query_params['redirect_uri'] = [
             f'https://{request.url.netloc}/github-proxy/callback'
@@ -66,7 +72,9 @@ def add_github_proxy_routes(app: FastAPI):
         parsed_url = urlparse(str(request.url))
         query_params = parse_qs(parsed_url.query)
         state = query_params['state'][0]
-        decrypted_state = _fernet().decrypt(b64decode(state.encode())).decode()
+        # Decrypt and decompress (reverse of github_proxy_start)
+        decrypted_payload = _fernet().decrypt(b64decode(state.encode()))
+        decrypted_state = zlib.decompress(decrypted_payload).decode()
 
         # Build query Params
         state, redirect_uri = json.loads(decrypted_state)
@@ -87,7 +95,7 @@ def add_github_proxy_routes(app: FastAPI):
             ]
             body = urlencode(query_params, doseq=True)
         url = 'https://github.com/login/oauth/access_token'
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=httpx_verify_option()) as client:
             response = await client.post(url, content=body)
             return Response(
                 response.content,
@@ -101,7 +109,7 @@ def add_github_proxy_routes(app: FastAPI):
         logger.info(f'github_proxy_post:1:{path}')
         body = await request.body()
         url = f'https://github.com/{path}'
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=httpx_verify_option()) as client:
             response = await client.post(url, content=body, headers=request.headers)
             return Response(
                 response.content,

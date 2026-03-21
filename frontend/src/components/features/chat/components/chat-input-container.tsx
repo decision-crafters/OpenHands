@@ -1,21 +1,23 @@
 import React from "react";
-import { ConversationStatus } from "#/types/conversation-status";
 import { DragOver } from "../drag-over";
 import { UploadedFiles } from "../uploaded-files";
 import { ChatInputRow } from "./chat-input-row";
 import { ChatInputActions } from "./chat-input-actions";
+import { SlashCommandMenu } from "./slash-command-menu";
+import { useConversationStore } from "#/stores/conversation-store";
+import { cn } from "#/utils/utils";
+import { SlashCommandItem } from "#/hooks/chat/use-slash-command";
 
 interface ChatInputContainerProps {
   chatContainerRef: React.RefObject<HTMLDivElement | null>;
   isDragOver: boolean;
   disabled: boolean;
+  isNewConversationPending?: boolean;
   showButton: boolean;
   buttonClassName: string;
-  conversationStatus: ConversationStatus | null;
   chatInputRef: React.RefObject<HTMLDivElement | null>;
   handleFileIconClick: (isDisabled: boolean) => void;
   handleSubmit: () => void;
-  handleStop: (onStop?: () => void) => void;
   handleResumeAgent: () => void;
   onDragOver: (e: React.DragEvent, isDisabled: boolean) => void;
   onDragLeave: (e: React.DragEvent, isDisabled: boolean) => void;
@@ -25,20 +27,22 @@ interface ChatInputContainerProps {
   onKeyDown: (e: React.KeyboardEvent) => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  onStop?: () => void;
+  isSlashMenuOpen?: boolean;
+  slashItems?: SlashCommandItem[];
+  slashSelectedIndex?: number;
+  onSlashSelect?: (item: SlashCommandItem) => void;
 }
 
 export function ChatInputContainer({
   chatContainerRef,
   isDragOver,
   disabled,
+  isNewConversationPending = false,
   showButton,
   buttonClassName,
-  conversationStatus,
   chatInputRef,
   handleFileIconClick,
   handleSubmit,
-  handleStop,
   handleResumeAgent,
   onDragOver,
   onDragLeave,
@@ -48,12 +52,22 @@ export function ChatInputContainer({
   onKeyDown,
   onFocus,
   onBlur,
-  onStop,
+  isSlashMenuOpen = false,
+  slashItems = [],
+  slashSelectedIndex = 0,
+  onSlashSelect,
 }: ChatInputContainerProps) {
+  const conversationMode = useConversationStore(
+    (state) => state.conversationMode,
+  );
+
   return (
     <div
       ref={chatContainerRef}
-      className="bg-[#25272D] box-border content-stretch flex flex-col items-start justify-center p-4 pt-3 relative rounded-[15px] w-full"
+      className={cn(
+        "bg-[#25272D] box-border content-stretch flex flex-col items-start justify-center p-4 pt-3 relative rounded-[15px] w-full",
+        conversationMode === "plan" && "border border-[#597FF4]",
+      )}
       onDragOver={(e) => onDragOver(e, disabled)}
       onDragLeave={(e) => onDragLeave(e, disabled)}
       onDrop={(e) => onDrop(e, disabled)}
@@ -63,26 +77,36 @@ export function ChatInputContainer({
 
       <UploadedFiles />
 
-      <ChatInputRow
-        chatInputRef={chatInputRef}
-        disabled={disabled}
-        showButton={showButton}
-        buttonClassName={buttonClassName}
-        handleFileIconClick={handleFileIconClick}
-        handleSubmit={handleSubmit}
-        onInput={onInput}
-        onPaste={onPaste}
-        onKeyDown={onKeyDown}
-        onFocus={onFocus}
-        onBlur={onBlur}
-      />
+      {/* Wrapper so the slash menu anchors just above the input row,
+          not above the entire (possibly resized) container */}
+      <div className="relative w-full">
+        {isSlashMenuOpen && onSlashSelect && (
+          <SlashCommandMenu
+            items={slashItems}
+            selectedIndex={slashSelectedIndex}
+            onSelect={onSlashSelect}
+          />
+        )}
+
+        <ChatInputRow
+          chatInputRef={chatInputRef}
+          disabled={disabled}
+          isNewConversationPending={isNewConversationPending}
+          showButton={showButton}
+          buttonClassName={buttonClassName}
+          handleFileIconClick={handleFileIconClick}
+          handleSubmit={handleSubmit}
+          onInput={onInput}
+          onPaste={onPaste}
+          onKeyDown={onKeyDown}
+          onFocus={onFocus}
+          onBlur={onBlur}
+        />
+      </div>
 
       <ChatInputActions
-        conversationStatus={conversationStatus}
         disabled={disabled}
-        handleStop={handleStop}
         handleResumeAgent={handleResumeAgent}
-        onStop={onStop}
       />
     </div>
   );

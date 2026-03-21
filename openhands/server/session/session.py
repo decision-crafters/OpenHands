@@ -1,3 +1,11 @@
+# IMPORTANT: LEGACY V0 CODE - Deprecated since version 1.0.0, scheduled for removal April 1, 2026
+# This file is part of the legacy (V0) implementation of OpenHands and will be removed soon as we complete the migration to V1.
+# OpenHands V1 uses the Software Agent SDK for the agentic core and runs a new application server. Please refer to:
+#   - V1 agentic core (SDK): https://github.com/OpenHands/software-agent-sdk
+#   - V1 application server (in this repo): openhands/app_server/
+# Unless you are working on deprecation, please avoid extending this legacy file and consult the V1 codepaths above.
+# Tag: Legacy-V0
+# This module belongs to the old V0 web server. The V1 application server lives under openhands/app_server/.
 import asyncio
 import time
 from logging import LoggerAdapter
@@ -100,13 +108,6 @@ class WebSession:
             EventStreamSubscriber.SERVER, self.on_event, self.sid
         )
         self.config = config
-
-        # Lazy import to avoid circular dependency
-        from openhands.experiments.experiment_manager import ExperimentManagerImpl
-
-        self.config = ExperimentManagerImpl.run_config_variant_test(
-            user_id, sid, self.config
-        )
         self.loop = asyncio.get_event_loop()
         self.user_id = user_id
 
@@ -194,10 +195,11 @@ class WebSession:
             self.logger.debug(f'Merged custom MCP Config: {mcp_config}')
 
         # Add OpenHands' MCP server by default
-        openhands_mcp_server, openhands_mcp_stdio_servers = (
-            OpenHandsMCPConfigImpl.create_default_mcp_server_config(
-                self.config.mcp_host, self.config, self.user_id
-            )
+        (
+            openhands_mcp_server,
+            openhands_mcp_stdio_servers,
+        ) = await OpenHandsMCPConfigImpl.create_default_mcp_server_config(
+            self.config.mcp_host, self.config, self.user_id
         )
 
         if openhands_mcp_server:
@@ -226,7 +228,7 @@ class WebSession:
             # The order matters: with the browser output first, the summarizer
             # will only see the most recent browser output, which should keep
             # the summarization cost down.
-            max_events_for_condenser = settings.condenser_max_size or 120
+            max_events_for_condenser = settings.condenser_max_size or 240
             default_condenser_config = CondenserPipelineConfig(
                 condensers=[
                     ConversationWindowCondenserConfig(),
@@ -390,9 +392,15 @@ class WebSession:
             _waiting_times = 1
 
             if self.sio:
+                # Get timeout from configuration, default to 30 seconds
+                client_wait_timeout = self.config.client_wait_timeout
+                self.logger.debug(
+                    f'Using client wait timeout: {client_wait_timeout}s for session {self.sid}'
+                )
+
                 # Wait once during initialization to avoid event push failures during websocket connection intervals
                 while self._wait_websocket_initial_complete and (
-                    time.time() - _start_time < 2
+                    time.time() - _start_time < client_wait_timeout
                 ):
                     if bool(
                         self.sio.manager.rooms.get('/', {}).get(
@@ -400,12 +408,18 @@ class WebSession:
                         )
                     ):
                         break
-                    self.logger.warning(
-                        f'There is no listening client in the current room,'
-                        f' waiting for the {_waiting_times}th attempt: {self.sid}'
-                    )
+
+                    # Progressive backoff: start with 0.1s, increase to 1s after 10 attempts
+                    sleep_duration = 0.1 if _waiting_times <= 10 else 1.0
+
+                    # Log every 2 seconds to reduce spam
+                    if _waiting_times % (20 if sleep_duration == 0.1 else 2) == 0:
+                        self.logger.debug(
+                            f'There is no listening client in the current room,'
+                            f' waiting for the {_waiting_times}th attempt (timeout: {client_wait_timeout}s): {self.sid}'
+                        )
                     _waiting_times += 1
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(sleep_duration)
                 self._wait_websocket_initial_complete = False
                 await self.sio.emit('oh_event', data, to=ROOM_KEY.format(sid=self.sid))
 
