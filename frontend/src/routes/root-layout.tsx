@@ -26,10 +26,14 @@ import { useSyncPostHogConsent } from "#/hooks/use-sync-posthog-consent";
 import { useAutoSelectOrganization } from "#/hooks/use-auto-select-organization";
 import { LOCAL_STORAGE_KEYS } from "#/utils/local-storage";
 import { EmailVerificationGuard } from "#/components/features/guards/email-verification-guard";
+import { OnboardingGuard } from "#/components/features/guards/onboarding-guard";
 import { AlertBanner } from "#/components/features/alerts/alert-banner";
 import { cn } from "#/utils/utils";
 import { LoadingSpinner } from "#/components/shared/loading-spinner";
 import { useAppTitle } from "#/hooks/use-app-title";
+import { useAutoAcceptInvitation } from "#/hooks/use-auto-accept-invitation";
+import { ConversationLimitModal } from "#/components/features/org/conversation-limit-modal";
+import { useConversationLimitStore } from "#/stores/conversation-limit-store";
 
 export function ErrorBoundary() {
   const error = useRouteError();
@@ -83,6 +87,16 @@ export default function MainApp() {
   } = useIsAuthed();
 
   const [consentFormIsOpen, setConsentFormIsOpen] = React.useState(false);
+
+  // Accept a pending invitation token once authenticated
+  useAutoAcceptInvitation();
+
+  // Conversation limit modal state
+  const {
+    isOpen: isConversationLimitModalOpen,
+    limit: conversationLimit,
+    closeLimitModal,
+  } = useConversationLimitStore();
 
   // Auto-login if login method is stored in local storage
   useAutoLogin();
@@ -231,7 +245,7 @@ export default function MainApp() {
       <title>{appTitle}</title>
       <Sidebar />
 
-      <div className="flex flex-col w-full h-[calc(100%-50px)] md:h-full gap-3">
+      <div className="flex flex-col w-full min-w-0 h-[calc(100%-50px)] md:h-full gap-3">
         {config.data &&
           (config.data.maintenance_start_time ||
             (config.data.faulty_models &&
@@ -248,9 +262,11 @@ export default function MainApp() {
           id="root-outlet"
           className="flex-1 relative overflow-auto custom-scrollbar"
         >
-          <EmailVerificationGuard>
-            <Outlet />
-          </EmailVerificationGuard>
+          <OnboardingGuard>
+            <EmailVerificationGuard>
+              <Outlet />
+            </EmailVerificationGuard>
+          </OnboardingGuard>
         </div>
       </div>
 
@@ -260,6 +276,12 @@ export default function MainApp() {
           onClose={() => {
             setConsentFormIsOpen(false);
           }}
+        />
+      )}
+      {isConversationLimitModalOpen && conversationLimit !== null && (
+        <ConversationLimitModal
+          onClose={closeLimitModal}
+          limit={conversationLimit}
         />
       )}
     </div>

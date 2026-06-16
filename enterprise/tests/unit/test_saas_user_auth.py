@@ -22,8 +22,8 @@ from server.auth.saas_user_auth import (
 from storage.api_key_store import ApiKeyValidationResult
 from storage.user_authorization import UserAuthorizationType
 
-from openhands.integrations.provider import ProviderToken, ProviderType
-from openhands.storage.data_models.secrets import Secrets
+from openhands.app_server.integrations.provider import ProviderToken, ProviderType
+from openhands.app_server.secrets.secrets_models import Secrets
 
 
 @pytest.fixture
@@ -71,10 +71,14 @@ def mock_token_manager():
 
 @pytest.fixture
 def mock_config():
-    with patch('server.auth.saas_user_auth.get_config') as mock_get_config:
-        mock_cfg = mock_get_config.return_value
-        mock_cfg.jwt_secret.get_secret_value.return_value = 'test_secret'
-        yield mock_cfg
+    from openhands.app_server.services.jwt_service import JwtService
+    from openhands.app_server.utils.encryption_key import EncryptionKey
+
+    jwt_svc = JwtService(
+        keys=[EncryptionKey(kid='test', key=SecretStr('test_secret'), active=True)]
+    )
+    with patch('storage.encrypt_utils.get_jwt_service', return_value=jwt_svc):
+        yield
 
 
 @pytest.mark.asyncio
@@ -367,19 +371,28 @@ async def test_get_provider_tokens_cached(mock_token_manager):
 @pytest.mark.asyncio
 async def test_get_user_settings_store():
     """Test that get_user_settings_store returns a settings store."""
-    with patch('server.auth.saas_user_auth.SaasSettingsStore') as mock_store_cls:
+    user_id = str(uuid.uuid4())
+    org_id = uuid.uuid4()
+    mock_user = MagicMock()
+    mock_user.current_org_id = org_id
+
+    with (
+        patch('server.auth.saas_user_auth.SaasSettingsStore') as mock_store_cls,
+        patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+    ):
         mock_store = MagicMock()
         mock_store_cls.return_value = mock_store
+        mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
 
         user_auth = SaasUserAuth(
-            user_id='test_user_id',
+            user_id=user_id,
             refresh_token=SecretStr('refresh_token'),
         )
 
         result = await user_auth.get_user_settings_store()
 
         assert result == mock_store
-        mock_store_cls.assert_called_once()
+        mock_store_cls.assert_called_once_with(user_id, effective_org_id=org_id)
         assert user_auth.settings_store == mock_store
 
 
@@ -910,3 +923,638 @@ async def test_saas_user_auth_from_signed_token_domain_blocking_inactive(mock_co
         mock_user_auth_store.get_authorization_type.assert_called_once_with(
             'user@colsch.us', None
         )
+
+
+# =============================================================================
+# Tests for OPENHANDS_API_KEY injection
+# =============================================================================
+
+
+class TestOpenHandsApiKey:
+    """Tests for OPENHANDS_API_KEY system secret generation and injection."""
+
+    @pytest.mark.asyncio
+    async def test_get_openhands_api_key_creates_system_key(self):
+        """Test that _get_openhands_api_key creates a system key via ApiKeyStore."""
+        user_id = 'test_user_id'
+        org_id = uuid.uuid4()
+        expected_api_key = 'sk-oh-test-key-12345'
+
+        # Create mock user
+        mock_user = MagicMock()
+        mock_user.current_org_id = org_id
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch('server.auth.saas_user_auth.ApiKeyStore') as mock_api_key_store_cls,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+
+            mock_api_key_store = MagicMock()
+            mock_api_key_store.get_or_create_system_api_key = AsyncMock(
+                return_value=expected_api_key
+            )
+            mock_api_key_store_cls.get_instance.return_value = mock_api_key_store
+
+            # Act
+            result = await user_auth._get_openhands_api_key()
+
+            # Assert
+            assert result == expected_api_key
+            mock_user_store.get_user_by_id.assert_called_once_with(user_id)
+            mock_api_key_store.get_or_create_system_api_key.assert_called_once_with(
+                user_id=user_id,
+                org_id=org_id,
+                name='OPENHANDS_API_KEY',
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_openhands_api_key_raises_for_missing_user(self):
+        """Test that _get_openhands_api_key raises ValueError if user not found.
+
+        The error message now collapses ``user not found`` and
+        ``user without org`` into a single ``has no current organization``
+        case, since both ultimately mean we cannot resolve an effective
+        org for the request.
+        """
+        user_id = 'nonexistent_user'
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with patch('server.auth.saas_user_auth.UserStore') as mock_user_store:
+            mock_user_store.get_user_by_id = AsyncMock(return_value=None)
+
+            # Act & Assert
+            with pytest.raises(
+                ValueError, match=f'User {user_id} has no current organization'
+            ):
+                await user_auth._get_openhands_api_key()
+
+    @pytest.mark.asyncio
+    async def test_get_openhands_api_key_raises_for_user_without_org(self):
+        """Test that _get_openhands_api_key raises ValueError if user has no org."""
+        user_id = 'test_user_id'
+
+        # Create mock user with no current organization
+        mock_user = MagicMock()
+        mock_user.current_org_id = None
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with patch('server.auth.saas_user_auth.UserStore') as mock_user_store:
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+
+            # Act & Assert
+            with pytest.raises(ValueError, match='has no current organization'):
+                await user_auth._get_openhands_api_key()
+
+    @pytest.mark.asyncio
+    async def test_get_secrets_includes_openhands_api_key(self):
+        """Test that get_secrets injects OPENHANDS_API_KEY into custom_secrets."""
+        user_id = 'test_user_id'
+        org_id = uuid.uuid4()
+        expected_api_key = 'sk-oh-test-key-12345'
+
+        # Create mock user
+        mock_user = MagicMock()
+        mock_user.current_org_id = org_id
+
+        # Create mock secrets from store (without OPENHANDS_API_KEY)
+        mock_stored_secrets = Secrets(
+            custom_secrets={
+                'MY_SECRET': {
+                    'secret': 'my-secret-value',
+                    'description': 'My custom secret',
+                }
+            }
+        )
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch('server.auth.saas_user_auth.ApiKeyStore') as mock_api_key_store_cls,
+            patch(
+                'server.auth.saas_user_auth.SaasSecretsStore'
+            ) as mock_secrets_store_cls,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+
+            mock_api_key_store = MagicMock()
+            mock_api_key_store.get_or_create_system_api_key = AsyncMock(
+                return_value=expected_api_key
+            )
+            mock_api_key_store_cls.get_instance.return_value = mock_api_key_store
+
+            mock_secrets_store = MagicMock()
+            mock_secrets_store.load = AsyncMock(return_value=mock_stored_secrets)
+            mock_secrets_store_cls.get_instance = AsyncMock(
+                return_value=mock_secrets_store
+            )
+
+            # Act
+            result = await user_auth.get_secrets()
+
+            # Assert
+            assert result is not None
+            assert 'OPENHANDS_API_KEY' in result.custom_secrets
+            assert (
+                result.custom_secrets['OPENHANDS_API_KEY'].secret.get_secret_value()
+                == expected_api_key
+            )
+            assert (
+                'system-managed'
+                in result.custom_secrets['OPENHANDS_API_KEY'].description
+            )
+            # Original secret should still be present
+            assert 'MY_SECRET' in result.custom_secrets
+
+    @pytest.mark.asyncio
+    async def test_get_secrets_caches_result(self):
+        """Test that get_secrets caches the result and doesn't call store again."""
+        user_id = 'test_user_id'
+        org_id = uuid.uuid4()
+        expected_api_key = 'sk-oh-test-key-12345'
+
+        mock_user = MagicMock()
+        mock_user.current_org_id = org_id
+
+        mock_stored_secrets = Secrets()
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch('server.auth.saas_user_auth.ApiKeyStore') as mock_api_key_store_cls,
+            patch(
+                'server.auth.saas_user_auth.SaasSecretsStore'
+            ) as mock_secrets_store_cls,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+
+            mock_api_key_store = MagicMock()
+            mock_api_key_store.get_or_create_system_api_key = AsyncMock(
+                return_value=expected_api_key
+            )
+            mock_api_key_store_cls.get_instance.return_value = mock_api_key_store
+
+            mock_secrets_store = MagicMock()
+            mock_secrets_store.load = AsyncMock(return_value=mock_stored_secrets)
+            mock_secrets_store_cls.get_instance = AsyncMock(
+                return_value=mock_secrets_store
+            )
+
+            # Act - call get_secrets twice
+            result1 = await user_auth.get_secrets()
+            result2 = await user_auth.get_secrets()
+
+            # Assert - store.load should only be called once (caching)
+            assert result1 is result2
+            mock_secrets_store.load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_secrets_handles_empty_stored_secrets(self):
+        """Test that get_secrets works when store returns empty Secrets."""
+        user_id = 'test_user_id'
+        org_id = uuid.uuid4()
+        expected_api_key = 'sk-oh-test-key-12345'
+
+        mock_user = MagicMock()
+        mock_user.current_org_id = org_id
+
+        # Empty secrets from store
+        mock_stored_secrets = Secrets()
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch('server.auth.saas_user_auth.ApiKeyStore') as mock_api_key_store_cls,
+            patch(
+                'server.auth.saas_user_auth.SaasSecretsStore'
+            ) as mock_secrets_store_cls,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+
+            mock_api_key_store = MagicMock()
+            mock_api_key_store.get_or_create_system_api_key = AsyncMock(
+                return_value=expected_api_key
+            )
+            mock_api_key_store_cls.get_instance.return_value = mock_api_key_store
+
+            mock_secrets_store = MagicMock()
+            mock_secrets_store.load = AsyncMock(return_value=mock_stored_secrets)
+            mock_secrets_store_cls.get_instance = AsyncMock(
+                return_value=mock_secrets_store
+            )
+
+            # Act
+            result = await user_auth.get_secrets()
+
+            # Assert - should have only OPENHANDS_API_KEY
+            assert result is not None
+            assert 'OPENHANDS_API_KEY' in result.custom_secrets
+            assert len(result.custom_secrets) == 1
+
+
+class TestGetMaxConcurrentSandboxes:
+    """Tests for SaasUserAuth.get_max_concurrent_sandboxes() method.
+
+    This method resolves concurrent sandbox limits in the following order:
+    1. OrgMember.max_concurrent_sandboxes_override (if not NULL)
+    2. Org.max_concurrent_sandboxes (org default)
+    3. The provided default value
+    """
+
+    @pytest.fixture
+    def user_id(self):
+        """Create a test user ID."""
+        return str(uuid.uuid4())
+
+    @pytest.fixture
+    def org_id(self):
+        """Create a test organization ID."""
+        return uuid.uuid4()
+
+    @pytest.fixture
+    def mock_user(self, org_id):
+        """Create a mock user with current_org_id."""
+        user = MagicMock()
+        user.current_org_id = org_id
+        return user
+
+    @pytest.fixture
+    def mock_org_member_with_override(self, org_id, user_id):
+        """Create a mock org member with override set."""
+        member = MagicMock()
+        member.org_id = org_id
+        member.user_id = uuid.UUID(user_id)
+        member.max_concurrent_sandboxes_override = 15
+        return member
+
+    @pytest.fixture
+    def mock_org_member_no_override(self, org_id, user_id):
+        """Create a mock org member with override as None."""
+        member = MagicMock()
+        member.org_id = org_id
+        member.user_id = uuid.UUID(user_id)
+        member.max_concurrent_sandboxes_override = None
+        return member
+
+    @pytest.fixture
+    def mock_org_with_limit(self, org_id):
+        """Create a mock org with max_concurrent_sandboxes set."""
+        org = MagicMock()
+        org.id = org_id
+        org.max_concurrent_sandboxes = 8
+        return org
+
+    # HAPPY PATH TESTS
+
+    @pytest.mark.asyncio
+    async def test_returns_org_member_override_when_set(
+        self,
+        user_id,
+        org_id,
+        mock_user,
+        mock_org_member_with_override,
+        mock_org_with_limit,
+    ):
+        """
+        GIVEN: User has an org_member with max_concurrent_sandboxes_override set
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the override value (15)
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            # OrgMemberStore is imported locally inside the function
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_with_override
+            mock_get_org.return_value = mock_org_with_limit
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 15
+            # OrgStore should not be called when override exists
+            mock_get_org.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_org_default_when_override_is_none(
+        self,
+        user_id,
+        org_id,
+        mock_user,
+        mock_org_member_no_override,
+        mock_org_with_limit,
+    ):
+        """
+        GIVEN: User has org_member with override=None, org has max_concurrent_sandboxes set
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the org's max_concurrent_sandboxes (8)
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_no_override
+            mock_get_org.return_value = mock_org_with_limit
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 8
+
+    @pytest.mark.asyncio
+    async def test_returns_default_when_both_org_and_override_unset(
+        self, user_id, org_id, mock_user, mock_org_member_no_override
+    ):
+        """
+        GIVEN: User has org_member with override=None, org has max_concurrent_sandboxes=None
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the default value (10)
+        """
+        mock_org_no_limit = MagicMock()
+        mock_org_no_limit.id = org_id
+        mock_org_no_limit.max_concurrent_sandboxes = None
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_no_override
+            mock_get_org.return_value = mock_org_no_limit
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10  # default
+
+    @pytest.mark.asyncio
+    async def test_returns_custom_default_when_no_limits_set(
+        self, user_id, org_id, mock_user, mock_org_member_no_override
+    ):
+        """
+        GIVEN: No limits are set anywhere
+        WHEN: get_max_concurrent_sandboxes is called with custom default (5)
+        THEN: Returns the custom default (5)
+        """
+        mock_org_no_limit = MagicMock()
+        mock_org_no_limit.id = org_id
+        mock_org_no_limit.max_concurrent_sandboxes = None
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_no_override
+            mock_get_org.return_value = mock_org_no_limit
+
+            result = await user_auth.get_max_concurrent_sandboxes(default=5)
+
+            assert result == 5
+
+    @pytest.mark.asyncio
+    async def test_returns_default_when_user_has_no_current_org_id(self, user_id):
+        """
+        GIVEN: User has no current_org_id
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the default value (10) immediately
+        """
+        mock_user_no_org = MagicMock()
+        mock_user_no_org.current_org_id = None
+
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with patch('server.auth.saas_user_auth.UserStore') as mock_user_store:
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user_no_org)
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10
+
+    @pytest.mark.asyncio
+    async def test_returns_default_when_user_does_not_exist(self, user_id):
+        """
+        GIVEN: User does not exist in database
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the default value (10)
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with patch('server.auth.saas_user_auth.UserStore') as mock_user_store:
+            mock_user_store.get_user_by_id = AsyncMock(return_value=None)
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10
+
+    @pytest.mark.asyncio
+    async def test_returns_org_default_when_org_member_not_found(
+        self, user_id, org_id, mock_user, mock_org_with_limit
+    ):
+        """
+        GIVEN: User exists but has no org_member record
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Falls back to org's max_concurrent_sandboxes
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = None
+            mock_get_org.return_value = mock_org_with_limit
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 8
+
+    @pytest.mark.asyncio
+    async def test_returns_default_when_org_not_found(
+        self, user_id, org_id, mock_user, mock_org_member_no_override
+    ):
+        """
+        GIVEN: OrgMember exists but org does not exist
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the default value (10)
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_no_override
+            mock_get_org.return_value = None
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10
+
+    # UNHAPPY PATH TESTS
+
+    @pytest.mark.asyncio
+    async def test_handles_database_error_gracefully(
+        self, user_id, org_id, mock_user, mock_org_member_no_override
+    ):
+        """
+        GIVEN: A database error occurs during lookup
+        WHEN: get_max_concurrent_sandboxes is called
+        THEN: Returns the default value (10) without raising
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.side_effect = Exception('Database connection failed')
+            mock_get_org.return_value = mock_org_member_no_override
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10
+
+    @pytest.mark.asyncio
+    async def test_handles_org_store_error_gracefully(
+        self, user_id, org_id, mock_user, mock_org_member_no_override
+    ):
+        """
+        GIVEN: OrgStore raises an error
+        WHEN: get_max_concurrent_sandboxes is called after org_member check
+        THEN: Returns the default value (10) without raising
+        """
+        user_auth = SaasUserAuth(
+            user_id=user_id,
+            refresh_token=SecretStr('refresh_token'),
+        )
+
+        with (
+            patch('server.auth.saas_user_auth.UserStore') as mock_user_store,
+            patch(
+                'storage.org_member_store.OrgMemberStore.get_org_member',
+                new_callable=AsyncMock,
+            ) as mock_get_org_member,
+            patch(
+                'storage.org_store.OrgStore.get_org_by_id',
+                new_callable=AsyncMock,
+            ) as mock_get_org,
+        ):
+            mock_user_store.get_user_by_id = AsyncMock(return_value=mock_user)
+            mock_get_org_member.return_value = mock_org_member_no_override
+            mock_get_org.side_effect = Exception('Org lookup failed')
+
+            result = await user_auth.get_max_concurrent_sandboxes()
+
+            assert result == 10

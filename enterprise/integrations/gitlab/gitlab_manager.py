@@ -24,17 +24,17 @@ from integrations.v1_utils import get_saas_user_auth
 from jinja2 import Environment, FileSystemLoader
 from pydantic import SecretStr
 from server.auth.token_manager import TokenManager
-from server.utils.conversation_callback_utils import register_callback_processor
 
-from openhands.core.logger import openhands_logger as logger
-from openhands.integrations.gitlab.gitlab_service import GitLabServiceImpl
-from openhands.integrations.provider import ProviderToken, ProviderType
-from openhands.server.types import (
+from openhands.app_server.errors import ConcurrencyLimitError
+from openhands.app_server.integrations.gitlab.gitlab_service import GitLabServiceImpl
+from openhands.app_server.integrations.provider import ProviderToken, ProviderType
+from openhands.app_server.secrets.secrets_models import Secrets
+from openhands.app_server.types import (
     LLMAuthenticationError,
     MissingSettingsError,
     SessionExpiredError,
 )
-from openhands.storage.data_models.secrets import Secrets
+from openhands.app_server.utils.logger import openhands_logger as logger
 
 
 class GitlabManager(Manager[GitlabViewType]):
@@ -171,17 +171,11 @@ class GitlabManager(Manager[GitlabViewType]):
             )
 
     async def start_job(self, gitlab_view: GitlabViewType) -> None:
-        """
-        Start a job for the GitLab view.
+        """Start a job for the GitLab view using V1 app conversation system.
 
         Args:
             gitlab_view: The GitLab view object containing issue/PR/comment info
         """
-        # Importing here prevents circular import
-        from server.conversation_callback_processor.gitlab_callback_processor import (
-            GitlabCallbackProcessor,
-        )
-
         try:
             try:
                 user_info = gitlab_view.user_info
@@ -215,8 +209,8 @@ class GitlabManager(Manager[GitlabViewType]):
                     )
                 )
 
-                # Initialize conversation and get metadata (following GitHub pattern)
-                convo_metadata = await gitlab_view.initialize_new_conversation()
+                # Initialize conversation and get UUID
+                conversation_id = await gitlab_view.initialize_new_conversation()
 
                 saas_user_auth = await get_saas_user_auth(
                     gitlab_view.user_info.keycloak_user_id, self.token_manager
@@ -225,31 +219,19 @@ class GitlabManager(Manager[GitlabViewType]):
                 await gitlab_view.create_new_conversation(
                     self.jinja_env,
                     secret_store.provider_tokens,
-                    convo_metadata,
+                    conversation_id,
                     saas_user_auth,
                 )
 
-                conversation_id = gitlab_view.conversation_id
+                conversation_id_hex = gitlab_view.conversation_id
 
                 logger.info(
-                    f'[GitLab] Created conversation {conversation_id} for user {user_info.username}'
+                    f'[GitLab] Created conversation {conversation_id_hex} for user {user_info.username}'
                 )
 
-                if not gitlab_view.v1_enabled:
-                    # Create a GitlabCallbackProcessor for this conversation
-                    processor = GitlabCallbackProcessor(
-                        gitlab_view=gitlab_view,
-                        send_summary_instruction=True,
-                    )
+                # V1 callback processors are registered by the view during conversation creation
 
-                    # Register the callback processor
-                    register_callback_processor(conversation_id, processor)
-
-                    logger.info(
-                        f'[GitLab] Created callback processor for conversation {conversation_id}'
-                    )
-
-                conversation_link = CONVERSATION_URL.format(conversation_id)
+                conversation_link = CONVERSATION_URL.format(conversation_id_hex)
                 msg_info = f"I'm on it! {user_info.username} can [track my progress at all-hands.dev]({conversation_link})"
 
             except MissingSettingsError as e:
@@ -272,6 +254,19 @@ class GitlabManager(Manager[GitlabViewType]):
                 )
 
                 msg_info = get_session_expired_message(user_info.username)
+
+            except ConcurrencyLimitError as e:
+                detail = e.detail if isinstance(e.detail, dict) else {}
+                limit = detail.get('limit', '?')
+                logger.warning(
+                    f'[GitLab] Concurrency limit reached for user {user_info.username}',
+                    extra={'limit': limit, 'current': detail.get('current')},
+                )
+                msg_info = (
+                    f'@{user_info.username} You have reached your limit of {limit} '
+                    'concurrent conversation(s). Please close an existing conversation '
+                    f'to start a new one: {HOST_URL}'
+                )
 
             # Send the acknowledgment message
             await self.send_message(msg_info, gitlab_view)

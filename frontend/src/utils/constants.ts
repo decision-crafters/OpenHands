@@ -1,3 +1,5 @@
+import { SlashCommandItem } from "#/hooks/chat/use-slash-command";
+
 export const ASSET_FILE_TYPES = [
   ".png",
   ".jpg",
@@ -70,3 +72,58 @@ export const CHAT_INPUT = {
 
 // UI tolerance constants
 export const EPS = 1.5; // px tolerance for "near min" height comparisons
+
+/** The /btw slash command — asks a side question via the ask_agent endpoint. */
+export const BTW_COMMAND = "/btw";
+
+/** The /model slash command — lists or switches the conversation's LLM profile. */
+export const MODEL_COMMAND = "/model";
+
+/** Built-in slash commands surfaced in the menu for V1 conversations. */
+export const BUILT_IN_COMMANDS: SlashCommandItem[] = [
+  {
+    skill: {
+      name: "new",
+      type: "agentskills",
+      content: "Creates a new conversation using the same runtime",
+      triggers: ["/new"],
+    },
+    command: "/new",
+  },
+  {
+    skill: {
+      name: "btw",
+      type: "agentskills",
+      content: "Ask the agent a side question without derailing the main task",
+      triggers: [BTW_COMMAND],
+    },
+    command: BTW_COMMAND,
+  },
+  {
+    skill: {
+      name: "model",
+      type: "agentskills",
+      content:
+        "List saved LLM profiles, or switch the conversation LLM profile with /model <name>",
+      triggers: [MODEL_COMMAND],
+    },
+    command: MODEL_COMMAND,
+  },
+];
+
+// Skill content metadata prefixes
+export const METADATA_PREFIXES: readonly string[] = [
+  "The following information has been included",
+  "It may or may not be relevant",
+  "Skill location:",
+  "(Use this path to resolve",
+];
+
+/**
+ * Fallback concurrent sandbox limit used when the backend error does not
+ * include a limit value. Matches DEFAULT_COMMERCIAL_ORG_CONCURRENT_SANDBOXES
+ * in the backend (enterprise/server/constants.py).
+ * Personal workspaces have a lower limit (3) — the backend always sends the
+ * actual limit in the error detail, so this constant is only a safety net.
+ */
+export const DEFAULT_CONCURRENT_SANDBOX_LIMIT = 10;

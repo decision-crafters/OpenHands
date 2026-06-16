@@ -31,6 +31,7 @@ const createMockConfig = (
       hide_users_page: false,
       hide_billing_page: false,
       hide_integrations_page: false,
+      enable_onboarding: false,
       ...featureFlagOverrides,
     },
     providers_configured: [],
@@ -183,6 +184,36 @@ describe("Sidebar", () => {
       await waitFor(() => {
         expect(screen.queryByTestId("ai-config-modal")).not.toBeInTheDocument();
       });
+    });
+  });
+
+  describe("Automations button visibility", () => {
+    it("should show automations button when feature_flags.enable_automations is true", async () => {
+      getConfigSpy.mockResolvedValue(
+        createMockConfig({ feature_flags: { enable_automations: true } }),
+      );
+
+      renderSidebar();
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId("automations-button"),
+        ).toBeInTheDocument();
+      });
+    });
+
+    it("should hide automations button when feature_flags.enable_automations is false", async () => {
+      getConfigSpy.mockResolvedValue(
+        createMockConfig({ feature_flags: { enable_automations: false } }),
+      );
+
+      renderSidebar();
+
+      await waitFor(() => expect(getSettingsSpy).toHaveBeenCalled());
+
+      expect(
+        screen.queryByTestId("automations-button"),
+      ).not.toBeInTheDocument();
     });
   });
 });

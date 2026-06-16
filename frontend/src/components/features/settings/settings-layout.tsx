@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { MobileHeader } from "./mobile-header";
 import { SettingsNavigation } from "./settings-navigation";
-import { SettingsNavItem } from "#/constants/settings-nav";
+import { SettingsNavRenderedItem } from "#/hooks/use-settings-nav-items";
 
 interface SettingsLayoutProps {
   children: React.ReactNode;
-  navigationItems: SettingsNavItem[];
+  navigationItems: SettingsNavRenderedItem[];
 }
 
 export function SettingsLayout({
@@ -33,7 +33,7 @@ export function SettingsLayout({
           navigationItems={navigationItems}
         />
         {/* Main content */}
-        <main className="flex-1 overflow-auto custom-scrollbar-always">
+        <main className="flex-1 min-w-0 overflow-auto custom-scrollbar-always">
           {children}
         </main>
       </div>

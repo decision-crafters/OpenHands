@@ -26,6 +26,8 @@ class SlackErrorCode(Enum):
     PROVIDER_AUTH_FAILED = 'SLACK_ERR_006'
     LLM_AUTH_FAILED = 'SLACK_ERR_007'
     MISSING_SETTINGS = 'SLACK_ERR_008'
+    MISSING_SLACK_SCOPES = 'SLACK_ERR_009'
+    CONCURRENCY_LIMIT = 'SLACK_ERR_010'
     UNEXPECTED_ERROR = 'SLACK_ERR_999'
 
 
@@ -97,6 +99,15 @@ _USER_MESSAGES: dict[SlackErrorCode, str] = {
     SlackErrorCode.MISSING_SETTINGS: (
         '{username} please re-login into '
         f'[OpenHands Cloud]({HOST_URL}) before starting a job.'
+    ),
+    SlackErrorCode.MISSING_SLACK_SCOPES: (
+        '⚠️ The Slack app is missing required permissions. '
+        f'Please ask your workspace admin to re-install the OpenHands Slack App at {HOST_URL}/slack/install '
+        'to authorize the updated permissions.'
+    ),
+    SlackErrorCode.CONCURRENCY_LIMIT: (
+        '🚦 {username} You have reached your limit of {limit} concurrent conversation(s). '
+        f'Please close an existing conversation at {HOST_URL} to start a new one.'
     ),
     SlackErrorCode.UNEXPECTED_ERROR: (
         'Uh oh! There was an unexpected error (ref: {code}). Please try again later.'

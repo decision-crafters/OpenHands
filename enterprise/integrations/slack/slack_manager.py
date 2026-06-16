@@ -1,6 +1,6 @@
 from typing import Any
 
-import jwt
+import httpx
 from integrations.manager import Manager
 from integrations.models import Message, SourceType
 from integrations.slack.slack_errors import SlackError, SlackErrorCode
@@ -24,27 +24,28 @@ from integrations.utils import (
 from integrations.v1_utils import get_saas_user_auth
 from jinja2 import Environment, FileSystemLoader
 from server.constants import SLACK_CLIENT_ID
-from server.utils.conversation_callback_utils import register_callback_processor
 from slack_sdk.oauth import AuthorizeUrlGenerator
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import select
 from storage.database import a_session_maker
+from storage.redis import get_redis_client_async
 from storage.slack_user import SlackUser
 
-from openhands.core.logger import openhands_logger as logger
-from openhands.integrations.provider import ProviderHandler
-from openhands.integrations.service_types import (
+from openhands.app_server.errors import ConcurrencyLimitError
+from openhands.app_server.integrations.provider import ProviderHandler
+from openhands.app_server.integrations.service_types import (
     AuthenticationError,
     ProviderTimeoutError,
     Repository,
 )
-from openhands.server.shared import config, server_config, sio
-from openhands.server.types import (
+from openhands.app_server.shared import server_config
+from openhands.app_server.types import (
     LLMAuthenticationError,
     MissingSettingsError,
     SessionExpiredError,
 )
-from openhands.server.user_auth.user_auth import UserAuth
+from openhands.app_server.user_auth.user_auth import UserAuth
+from openhands.app_server.utils.logger import openhands_logger as logger
 
 authorize_url_generator = AuthorizeUrlGenerator(
     client_id=SLACK_CLIENT_ID,
@@ -54,6 +55,8 @@ authorize_url_generator = AuthorizeUrlGenerator(
 
 # Key prefix for storing user messages in Redis during repo selection flow
 SLACK_USER_MSG_KEY_PREFIX = 'slack_user_msg'
+# Key prefix for deduplicating Slack repo selection form submissions
+SLACK_FORM_INTERACTION_KEY_PREFIX = 'slack_form_interaction'
 # Expiration time for stored user messages (5 minutes)
 # Arbitrary timeout based on typical user attention span; may be tuned based on feedback
 SLACK_USER_MSG_EXPIRATION = 300
@@ -115,7 +118,7 @@ class SlackManager(Manager[SlackViewInterface]):
         """
         key = f'{SLACK_USER_MSG_KEY_PREFIX}:{message_ts}:{thread_ts}'
         try:
-            redis = sio.manager.redis
+            redis = get_redis_client_async()
             await redis.set(key, user_msg, ex=SLACK_USER_MSG_EXPIRATION)
             logger.info(
                 'slack_stored_user_msg',
@@ -158,7 +161,7 @@ class SlackManager(Manager[SlackViewInterface]):
         """
         key = f'{SLACK_USER_MSG_KEY_PREFIX}:{message_ts}:{thread_ts}'
         try:
-            redis = sio.manager.redis
+            redis = get_redis_client_async()
             user_msg = await redis.get(key)
             if user_msg:
                 # Redis returns bytes, decode to string
@@ -203,6 +206,98 @@ class SlackManager(Manager[SlackViewInterface]):
                 log_context={'message_ts': message_ts, 'thread_ts': thread_ts},
             )
 
+    async def _claim_form_interaction(
+        self, team_id: str, channel_id: str, message_ts: str, thread_ts: str | None
+    ) -> bool:
+        """Atomically claim a repo selection form interaction.
+
+        Slack can deliver multiple button click payloads when a user clicks the
+        form repeatedly. Only the first interaction for an original Slack message
+        should start a conversation.
+        """
+        key = (
+            f'{SLACK_FORM_INTERACTION_KEY_PREFIX}:'
+            f'{team_id}:{channel_id}:{message_ts}:{thread_ts}'
+        )
+        try:
+            redis = get_redis_client_async()
+            claimed = await redis.set(
+                key,
+                'processing',
+                ex=SLACK_USER_MSG_EXPIRATION,
+                nx=True,
+            )
+            if claimed:
+                logger.info(
+                    'slack_form_interaction_claimed',
+                    extra={
+                        'message_ts': message_ts,
+                        'thread_ts': thread_ts,
+                        'key': key,
+                    },
+                )
+                return True
+
+            logger.info(
+                'slack_form_interaction_already_claimed',
+                extra={
+                    'message_ts': message_ts,
+                    'thread_ts': thread_ts,
+                    'key': key,
+                },
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                'slack_claim_form_interaction_failed',
+                extra={
+                    'message_ts': message_ts,
+                    'thread_ts': thread_ts,
+                    'key': key,
+                    'error': str(e),
+                },
+            )
+            raise SlackError(
+                SlackErrorCode.REDIS_STORE_FAILED,
+                log_context={'message_ts': message_ts, 'thread_ts': thread_ts},
+            )
+
+    async def _replace_repo_selection_form(
+        self, response_url: str | None, selected_repository: str | None
+    ) -> None:
+        """Replace the interactive repo selector with a non-interactive status."""
+        if not response_url:
+            return
+
+        selected_text = (
+            'No repository selected'
+            if selected_repository is None
+            else f'Repository selected: `{selected_repository}`'
+        )
+        message = {
+            'replace_original': True,
+            'text': f'{selected_text}. Starting conversation...',
+            'blocks': [
+                {
+                    'type': 'section',
+                    'text': {
+                        'type': 'mrkdwn',
+                        'text': f':white_check_mark: {selected_text}. Starting conversation...',
+                    },
+                }
+            ],
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(response_url, json=message)
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning(
+                'slack_replace_repo_selection_form_failed',
+                extra={'error': str(e)},
+            )
+
     async def _search_repositories(
         self, user_auth: UserAuth, query: str = '', per_page: int = 100
     ) -> list[Repository]:
@@ -239,12 +334,14 @@ class SlackManager(Manager[SlackViewInterface]):
     def _generate_repo_selection_form(
         self, message_ts: str, thread_ts: str | None
     ) -> list[dict[str, Any]]:
-        """Generate a repo selection form using external_select for dynamic loading.
+        """Generate a repo selection form with immediate "No Repository" button and search dropdown.
 
-        This uses Slack's external_select element which allows:
-        - Type-ahead search for repositories
-        - Dynamic loading of options from an external endpoint
-        - Support for users with many repositories (no 100 option limit)
+        This form provides two options side-by-side:
+        1. A "No Repository" button - immediately clickable without any loading
+        2. An external_select dropdown - for searching repositories dynamically
+
+        This design ensures "No Repository" is always immediately available while
+        still providing full dynamic search capability for repositories.
 
         Args:
             message_ts: The message timestamp for tracking
@@ -266,12 +363,22 @@ class SlackManager(Manager[SlackViewInterface]):
                 'type': 'section',
                 'text': {
                     'type': 'mrkdwn',
-                    'text': 'Type to search your repositories:',
+                    'text': 'Select a repository or continue without one:',
                 },
             },
             {
                 'type': 'actions',
                 'elements': [
+                    {
+                        'type': 'button',
+                        'action_id': f'no_repository:{message_ts}:{thread_ts}',
+                        'text': {
+                            'type': 'plain_text',
+                            'text': 'No Repository',
+                            'emoji': True,
+                        },
+                        'value': '-',
+                    },
                     {
                         'type': 'external_select',
                         'action_id': f'repository_select:{message_ts}:{thread_ts}',
@@ -279,8 +386,8 @@ class SlackManager(Manager[SlackViewInterface]):
                             'type': 'plain_text',
                             'text': 'Search repositories...',
                         },
-                        'min_query_length': 0,  # Load initial options immediately
-                    }
+                        'min_query_length': 0,
+                    },
                 ],
             },
         ]
@@ -288,8 +395,11 @@ class SlackManager(Manager[SlackViewInterface]):
     def _build_repo_options(self, repos: list[Repository]) -> list[dict[str, Any]]:
         """Build Slack options list from repositories.
 
-        Always includes a "No Repository" option at the top, followed by up to 99
-        repositories (Slack has a 100 option limit for external_select).
+        Returns up to 100 repositories formatted as Slack options
+        (Slack has a 100 option limit for external_select).
+
+        Note: "No Repository" is handled by a separate button in the form,
+        so it's not included in the dropdown options.
 
         Args:
             repos: List of Repository objects
@@ -297,13 +407,7 @@ class SlackManager(Manager[SlackViewInterface]):
         Returns:
             List of Slack option objects
         """
-        options: list[dict[str, Any]] = [
-            {
-                'text': {'type': 'plain_text', 'text': 'No Repository'},
-                'value': '-',
-            }
-        ]
-        options.extend(
+        return [
             {
                 'text': {
                     'type': 'plain_text',
@@ -311,9 +415,8 @@ class SlackManager(Manager[SlackViewInterface]):
                 },
                 'value': repo.full_name,
             }
-            for repo in repos[:99]  # Leave room for "No Repository" option
-        )
-        return options
+            for repo in repos[:100]
+        ]
 
     async def search_repos_for_slack(
         self, user_auth: UserAuth, query: str, per_page: int = 20
@@ -363,33 +466,70 @@ class SlackManager(Manager[SlackViewInterface]):
                 SlackError(SlackErrorCode.UNEXPECTED_ERROR),
             )
 
-    async def receive_form_interaction(self, slack_payload: dict):
-        """Process a Slack form interaction (repository selection).
+    def _parse_form_action(self, action: dict) -> tuple[str, str | None, str] | None:
+        """Parse action payload and extract message_ts, thread_ts, and selected value.
 
-        This handles the block_actions payload when a user selects a repository
-        from the dropdown form. It retrieves the original user message from Redis
-        and delegates to receive_message for processing.
+        This handles the different payload structures for button clicks vs dropdown
+        selections in the repository selection form.
+
+        Args:
+            action: The action object from the Slack payload
+
+        Returns:
+            Tuple of (message_ts, thread_ts, selected_value) if action is recognized,
+            None if the action_id is unknown.
+        """
+        action_id = action['action_id']
+
+        if action_id.startswith('no_repository:'):
+            # Button click - value is in 'value' field
+            attribs = action_id.split('no_repository:')[-1]
+            selected_value = action.get('value', '-')
+        elif action_id.startswith('repository_select:'):
+            # Dropdown selection - value is in 'selected_option'
+            attribs = action_id.split('repository_select:')[-1]
+            selected_value = action['selected_option']['value']
+        else:
+            return None
+
+        message_ts, thread_ts = attribs.split(':')
+        thread_ts = None if thread_ts == 'None' else thread_ts
+
+        return message_ts, thread_ts, selected_value
+
+    async def receive_form_interaction(self, slack_payload: dict):
+        """Process a Slack form interaction (repository selection or button click).
+
+        This handles the block_actions payload when a user interacts with the
+        repository selection form. It can handle:
+        - "No Repository" button click: proceeds with conversation without a repo
+        - Repository selection from dropdown: proceeds with the selected repo
 
         Args:
             slack_payload: The raw Slack interaction payload
         """
         # Extract fields from the Slack interaction payload
-        selected_repository = slack_payload['actions'][0]['selected_option']['value']
-        if selected_repository == '-':
-            selected_repository = None
-
+        action = slack_payload['actions'][0]
         slack_user_id = slack_payload['user']['id']
         channel_id = slack_payload['container']['channel_id']
         team_id = slack_payload['team']['id']
+        response_url = slack_payload.get('response_url')
 
-        # Get original message_ts and thread_ts from action_id
-        attribs = slack_payload['actions'][0]['action_id'].split('repository_select:')[
-            -1
-        ]
-        message_ts, thread_ts = attribs.split(':')
-        thread_ts = None if thread_ts == 'None' else thread_ts
+        # Parse the action to extract message_ts, thread_ts, and selected value
+        parsed = self._parse_form_action(action)
+        if parsed is None:
+            logger.warning(
+                'slack_unknown_action_id',
+                extra={
+                    'action_id': action['action_id'],
+                    'slack_user_id': slack_user_id,
+                },
+            )
+            return
 
-        # Build partial payload for error handling during Redis retrieval
+        message_ts, thread_ts, selected_value = parsed
+
+        # Build partial payload for error handling
         payload = {
             'team_id': team_id,
             'channel_id': channel_id,
@@ -397,6 +537,20 @@ class SlackManager(Manager[SlackViewInterface]):
             'message_ts': message_ts,
             'thread_ts': thread_ts,
         }
+
+        # Convert "-" (No Repository) to None
+        selected_repository = None if selected_value == '-' else selected_value
+
+        try:
+            if not await self._claim_form_interaction(
+                team_id, channel_id, message_ts, thread_ts
+            ):
+                return
+        except SlackError as e:
+            await self.handle_slack_error(payload, e)
+            return
+
+        await self._replace_repo_selection_form(response_url, selected_repository)
 
         # Retrieve the original user message from Redis
         try:
@@ -452,12 +606,9 @@ class SlackManager(Manager[SlackViewInterface]):
 
     def _generate_login_link_with_state(self, message: Message) -> str:
         """Generate OAuth login link with message state encoded."""
-        jwt_secret = config.jwt_secret
-        if not jwt_secret:
-            raise ValueError('Must configure jwt_secret')
-        state = jwt.encode(
-            message.message, jwt_secret.get_secret_value(), algorithm='HS256'
-        )
+        from storage.encrypt_utils import get_jwt_service
+
+        state = get_jwt_service().create_jws_token(message.message)
         return authorize_url_generator.generate(state)
 
     async def handle_slack_error(self, payload: dict, error: SlackError) -> None:
@@ -561,9 +712,11 @@ class SlackManager(Manager[SlackViewInterface]):
             return False
 
         inferred_repo = inferred_repos[0]
+        user_id: str | None = await slack_view.saas_user_auth.get_user_id()
+        # Fixes #14655
         logger.info(
             f'[Slack] Verifying inferred repo "{inferred_repo}" '
-            f'for user {user.slack_display_name} (id={slack_view.saas_user_auth.get_user_id()})'
+            f'for user {user.slack_display_name} (id={user_id})'
         )
 
         try:
@@ -631,6 +784,7 @@ class SlackManager(Manager[SlackViewInterface]):
             3. Otherwise shows the repo selection form
 
         Args:
+            message: Incoming Slack message.
             slack_view: Must be a SlackViewType (authenticated view that can start jobs)
 
         Returns:
@@ -651,11 +805,7 @@ class SlackManager(Manager[SlackViewInterface]):
         return False
 
     async def start_job(self, slack_view: SlackViewInterface) -> None:
-        # Importing here prevents circular import
-        from server.conversation_callback_processor.slack_callback_processor import (
-            SlackCallbackProcessor,
-        )
-
+        """Start a Slack job using V1 app conversation system."""
         try:
             msg_info = None
             user_info = slack_view.slack_to_openhands_user
@@ -672,37 +822,7 @@ class SlackManager(Manager[SlackViewInterface]):
                     f'[Slack] Created conversation {conversation_id} for user {user_info.slack_display_name}'
                 )
 
-                # Only add SlackCallbackProcessor for new conversations (not updates) and non-v1 conversations
-                if (
-                    not isinstance(slack_view, SlackUpdateExistingConversationView)
-                    and not slack_view.v1_enabled
-                ):
-                    # We don't re-subscribe for follow up messages from slack.
-                    # Summaries are generated for every messages anyways, we only need to do
-                    # this subscription once for the event which kicked off the job.
-
-                    processor = SlackCallbackProcessor(
-                        slack_user_id=slack_view.slack_user_id,
-                        channel_id=slack_view.channel_id,
-                        message_ts=slack_view.message_ts,
-                        thread_ts=slack_view.thread_ts,
-                        team_id=slack_view.team_id,
-                    )
-
-                    # Register the callback processor
-                    register_callback_processor(conversation_id, processor)
-
-                    logger.info(
-                        f'[Slack] Created callback processor for conversation {conversation_id}'
-                    )
-                elif isinstance(slack_view, SlackUpdateExistingConversationView):
-                    logger.info(
-                        f'[Slack] Skipping callback processor for existing conversation update {conversation_id}'
-                    )
-                elif slack_view.v1_enabled:
-                    logger.info(
-                        f'[Slack] Skipping callback processor for v1 conversation {conversation_id}'
-                    )
+                # V1 callback processors are registered by the view during conversation creation
 
                 msg_info = slack_view.get_response_msg()
 
@@ -726,6 +846,21 @@ class SlackManager(Manager[SlackViewInterface]):
                 )
 
                 msg_info = get_session_expired_message(user_info.slack_display_name)
+
+            except ConcurrencyLimitError as e:
+                detail = e.detail if isinstance(e.detail, dict) else {}
+                limit = detail.get('limit', '?')
+                logger.warning(
+                    f'[Slack] Concurrency limit reached for user {user_info.slack_display_name}',
+                    extra={'limit': limit, 'current': detail.get('current')},
+                )
+                msg_info = SlackError(
+                    SlackErrorCode.CONCURRENCY_LIMIT,
+                    message_kwargs={
+                        'username': user_info.slack_display_name,
+                        'limit': limit,
+                    },
+                ).get_user_message()
 
             except StartingConvoException as e:
                 msg_info = str(e)
